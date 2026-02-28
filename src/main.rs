@@ -4,7 +4,7 @@ mod ui;
 use anyhow::Result;
 use app::App;
 use crossterm::{
-    event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind},
+    event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyEventKind},
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
@@ -44,17 +44,9 @@ fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<()> {
                 if key.kind != KeyEventKind::Press {
                     continue;
                 }
-                match key.code {
-                    KeyCode::Char('q') | KeyCode::Esc => break,
-                    KeyCode::Up | KeyCode::Char('k') => app.move_up(),
-                    KeyCode::Down | KeyCode::Char('j') => app.move_down(),
-                    KeyCode::Enter => {
-                        app.confirm()?;
-                        if app.should_quit {
-                            break;
-                        }
-                    }
-                    _ => {}
+                app.handle_key(key.code);
+                if app.should_quit {
+                    break;
                 }
             }
         }
