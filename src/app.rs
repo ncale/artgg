@@ -14,6 +14,15 @@ pub enum Screen {
 }
 
 #[derive(Debug, Clone, PartialEq)]
+pub enum TasteScreenMode {
+    Browse,
+    Detail,
+    EditingDate(String),
+    SelectingKeywords,
+    Adding(String),
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub enum ProfileMode {
     Browse,
     Adding(String),
@@ -30,6 +39,10 @@ pub enum BuildStep {
 pub struct TasteProfile {
     pub id: i64,
     pub name: String,
+    pub date_start: Option<i64>,
+    pub date_end: Option<i64>,
+    pub is_public_domain: bool,
+    pub keywords: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -97,7 +110,10 @@ pub struct App {
     // Taste profiles
     pub taste_profiles: Vec<TasteProfile>,
     pub taste_selected: usize,
-    pub taste_mode: ProfileMode,
+    pub taste_mode: TasteScreenMode,
+    pub taste_detail_field: usize, // 0=date_start 1=date_end 2=public_domain 3=keywords 4=artists
+    pub available_keywords: Vec<(i64, String)>,
+    pub keyword_cursor: usize,
 
     // Display profiles
     pub display_profiles: Vec<DisplayProfile>,
@@ -123,6 +139,7 @@ impl App {
         let conn = db::open()?;
         let taste_profiles = db::load_taste_profiles(&conn)?;
         let display_profiles = db::load_display_profiles(&conn)?;
+        let available_keywords = db::load_keywords(&conn)?;
 
         Ok(Self {
             screen: Screen::Main,
@@ -130,7 +147,10 @@ impl App {
             main_selected: 0,
             taste_profiles,
             taste_selected: 0,
-            taste_mode: ProfileMode::Browse,
+            taste_mode: TasteScreenMode::Browse,
+            taste_detail_field: 0,
+            available_keywords,
+            keyword_cursor: 0,
             display_profiles,
             display_selected: 0,
             display_mode: ProfileMode::Browse,
@@ -191,7 +211,7 @@ impl App {
         match MainItem::ALL[self.main_selected] {
             MainItem::TasteProfiles => {
                 self.screen = Screen::TasteProfiles;
-                self.taste_mode = ProfileMode::Browse;
+                self.taste_mode = TasteScreenMode::Browse;
             }
             MainItem::DisplayProfiles => {
                 self.screen = Screen::DisplayProfiles;
@@ -210,7 +230,7 @@ impl App {
 
     fn handle_taste(&mut self, key: KeyCode) {
         match self.taste_mode.clone() {
-            ProfileMode::Browse => match key {
+            TasteScreenMode::Browse => match key {
                 KeyCode::Up | KeyCode::Char('k') => {
                     if !self.taste_profiles.is_empty() && self.taste_selected > 0 {
                         self.taste_selected -= 1;
@@ -223,8 +243,14 @@ impl App {
                         self.taste_selected += 1;
                     }
                 }
+                KeyCode::Enter => {
+                    if !self.taste_profiles.is_empty() {
+                        self.taste_mode = TasteScreenMode::Detail;
+                        self.taste_detail_field = 0;
+                    }
+                }
                 KeyCode::Char('a') => {
-                    self.taste_mode = ProfileMode::Adding(String::new());
+                    self.taste_mode = TasteScreenMode::Adding(String::new());
                 }
                 KeyCode::Char('d') | KeyCode::Delete => {
                     if !self.taste_profiles.is_empty() {
@@ -243,29 +269,188 @@ impl App {
                 }
                 _ => {}
             },
-            ProfileMode::Adding(mut buf) => match key {
-                KeyCode::Char(c) => {
+            TasteScreenMode::Detail => match key {
+                KeyCode::Up | KeyCode::Char('k') => {
+                    if self.taste_detail_field > 0 {
+                        self.taste_detail_field -= 1;
+                    }
+                }
+                KeyCode::Down | KeyCode::Char('j') => {
+                    if self.taste_detail_field < 4 {
+                        self.taste_detail_field += 1;
+                    }
+                }
+                KeyCode::Enter => match self.taste_detail_field {
+                    0 => {
+                        let val = self.taste_profiles[self.taste_selected]
+                            .date_start
+                            .map(|v| v.to_string())
+                            .unwrap_or_default();
+                        self.taste_mode = TasteScreenMode::EditingDate(val);
+                    }
+                    1 => {
+                        let val = self.taste_profiles[self.taste_selected]
+                            .date_end
+                            .map(|v| v.to_string())
+                            .unwrap_or_default();
+                        self.taste_mode = TasteScreenMode::EditingDate(val);
+                    }
+                    2 => {
+                        self.toggle_public_domain();
+                    }
+                    3 => {
+                        self.taste_mode = TasteScreenMode::SelectingKeywords;
+                        self.keyword_cursor = 0;
+                    }
+                    _ => {} // 4 = artists, no-op
+                },
+                KeyCode::Char('e') => match self.taste_detail_field {
+                    0 => {
+                        let val = self.taste_profiles[self.taste_selected]
+                            .date_start
+                            .map(|v| v.to_string())
+                            .unwrap_or_default();
+                        self.taste_mode = TasteScreenMode::EditingDate(val);
+                    }
+                    1 => {
+                        let val = self.taste_profiles[self.taste_selected]
+                            .date_end
+                            .map(|v| v.to_string())
+                            .unwrap_or_default();
+                        self.taste_mode = TasteScreenMode::EditingDate(val);
+                    }
+                    _ => {}
+                },
+                KeyCode::Char(' ') => {
+                    if self.taste_detail_field == 2 {
+                        self.toggle_public_domain();
+                    }
+                }
+                KeyCode::Esc => {
+                    self.taste_mode = TasteScreenMode::Browse;
+                }
+                _ => {}
+            },
+            TasteScreenMode::EditingDate(mut buf) => match key {
+                KeyCode::Char(c) if c.is_ascii_digit() => {
                     buf.push(c);
-                    self.taste_mode = ProfileMode::Adding(buf);
+                    self.taste_mode = TasteScreenMode::EditingDate(buf);
+                }
+                KeyCode::Char('-') if buf.is_empty() => {
+                    buf.push('-');
+                    self.taste_mode = TasteScreenMode::EditingDate(buf);
                 }
                 KeyCode::Backspace => {
                     buf.pop();
-                    self.taste_mode = ProfileMode::Adding(buf);
+                    self.taste_mode = TasteScreenMode::EditingDate(buf);
+                }
+                KeyCode::Enter => {
+                    let value: Option<i64> = if buf.is_empty() {
+                        None
+                    } else {
+                        buf.parse().ok()
+                    };
+                    let idx = self.taste_selected;
+                    match self.taste_detail_field {
+                        0 => self.taste_profiles[idx].date_start = value,
+                        1 => self.taste_profiles[idx].date_end = value,
+                        _ => {}
+                    }
+                    let (id, ds, de, pd) = {
+                        let p = &self.taste_profiles[idx];
+                        (p.id, p.date_start, p.date_end, p.is_public_domain)
+                    };
+                    db::update_taste_profile_fields(&self.conn, id, ds, de, pd)
+                        .expect("db update taste fields");
+                    self.taste_mode = TasteScreenMode::Detail;
+                }
+                KeyCode::Esc => {
+                    self.taste_mode = TasteScreenMode::Detail;
+                }
+                _ => {}
+            },
+            TasteScreenMode::SelectingKeywords => match key {
+                KeyCode::Up | KeyCode::Char('k') => {
+                    if self.keyword_cursor > 0 {
+                        self.keyword_cursor -= 1;
+                    }
+                }
+                KeyCode::Down | KeyCode::Char('j') => {
+                    if !self.available_keywords.is_empty()
+                        && self.keyword_cursor < self.available_keywords.len() - 1
+                    {
+                        self.keyword_cursor += 1;
+                    }
+                }
+                KeyCode::Char(' ') | KeyCode::Enter => {
+                    self.toggle_keyword();
+                }
+                KeyCode::Esc => {
+                    self.taste_mode = TasteScreenMode::Detail;
+                }
+                _ => {}
+            },
+            TasteScreenMode::Adding(mut buf) => match key {
+                KeyCode::Char(c) => {
+                    buf.push(c);
+                    self.taste_mode = TasteScreenMode::Adding(buf);
+                }
+                KeyCode::Backspace => {
+                    buf.pop();
+                    self.taste_mode = TasteScreenMode::Adding(buf);
                 }
                 KeyCode::Enter => {
                     if !buf.is_empty() {
                         let id = db::insert_taste_profile(&self.conn, &buf)
                             .expect("db insert taste");
-                        self.taste_profiles.push(TasteProfile { id, name: buf });
+                        self.taste_profiles.push(TasteProfile {
+                            id,
+                            name: buf,
+                            date_start: None,
+                            date_end: None,
+                            is_public_domain: false,
+                            keywords: vec![],
+                        });
                         self.taste_selected = self.taste_profiles.len() - 1;
-                        self.taste_mode = ProfileMode::Browse;
+                        self.taste_mode = TasteScreenMode::Browse;
                     }
                 }
                 KeyCode::Esc => {
-                    self.taste_mode = ProfileMode::Browse;
+                    self.taste_mode = TasteScreenMode::Browse;
                 }
                 _ => {}
             },
+        }
+    }
+
+    fn toggle_public_domain(&mut self) {
+        let idx = self.taste_selected;
+        self.taste_profiles[idx].is_public_domain = !self.taste_profiles[idx].is_public_domain;
+        let (id, ds, de, pd) = {
+            let p = &self.taste_profiles[idx];
+            (p.id, p.date_start, p.date_end, p.is_public_domain)
+        };
+        db::update_taste_profile_fields(&self.conn, id, ds, de, pd).expect("db update");
+    }
+
+    fn toggle_keyword(&mut self) {
+        if self.available_keywords.is_empty() {
+            return;
+        }
+        let cursor = self.keyword_cursor;
+        let (kw_id, kw_val) = self.available_keywords[cursor].clone();
+        let idx = self.taste_selected;
+        let already_selected = self.taste_profiles[idx].keywords.contains(&kw_val);
+        if already_selected {
+            self.taste_profiles[idx].keywords.retain(|k| k != &kw_val);
+            let profile_id = self.taste_profiles[idx].id;
+            db::remove_taste_profile_keyword(&self.conn, profile_id, kw_id)
+                .expect("db remove keyword");
+        } else if self.taste_profiles[idx].keywords.len() < 10 {
+            self.taste_profiles[idx].keywords.push(kw_val);
+            let profile_id = self.taste_profiles[idx].id;
+            db::add_taste_profile_keyword(&self.conn, profile_id, kw_id)
+                .expect("db add keyword");
         }
     }
 
