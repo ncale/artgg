@@ -1,5 +1,9 @@
+use anyhow::Result;
 use crossterm::event::KeyCode;
+use rusqlite::Connection;
 use std::env;
+
+use crate::db;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Screen {
@@ -24,11 +28,13 @@ pub enum BuildStep {
 
 #[derive(Debug, Clone)]
 pub struct TasteProfile {
+    pub id: i64,
     pub name: String,
 }
 
 #[derive(Debug, Clone)]
 pub struct DisplayProfile {
+    pub id: i64,
     pub name: String,
 }
 
@@ -103,29 +109,37 @@ pub struct App {
     pub build_taste_idx: usize,
     pub build_display_idx: usize,
     pub build_output_dir: String,
+
+    // Database
+    pub conn: Connection,
 }
 
 impl App {
-    pub fn new() -> Self {
+    pub fn new() -> Result<Self> {
         let default_output_dir = env::var("HOME")
             .map(|h| format!("{}/.local/share/artgg/gallery", h))
             .unwrap_or_else(|_| "~/.local/share/artgg/gallery".to_string());
 
-        Self {
+        let conn = db::open()?;
+        let taste_profiles = db::load_taste_profiles(&conn)?;
+        let display_profiles = db::load_display_profiles(&conn)?;
+
+        Ok(Self {
             screen: Screen::Main,
             should_quit: false,
             main_selected: 0,
-            taste_profiles: Vec::new(),
+            taste_profiles,
             taste_selected: 0,
             taste_mode: ProfileMode::Browse,
-            display_profiles: Vec::new(),
+            display_profiles,
             display_selected: 0,
             display_mode: ProfileMode::Browse,
             build_step: BuildStep::PickTaste,
             build_taste_idx: 0,
             build_display_idx: 0,
             build_output_dir: default_output_dir,
-        }
+            conn,
+        })
     }
 
     pub fn handle_key(&mut self, key: KeyCode) {
@@ -214,6 +228,8 @@ impl App {
                 }
                 KeyCode::Char('d') | KeyCode::Delete => {
                     if !self.taste_profiles.is_empty() {
+                        let id = self.taste_profiles[self.taste_selected].id;
+                        db::delete_taste_profile(&self.conn, id).expect("db delete taste");
                         self.taste_profiles.remove(self.taste_selected);
                         if self.taste_selected > 0
                             && self.taste_selected >= self.taste_profiles.len()
@@ -238,7 +254,9 @@ impl App {
                 }
                 KeyCode::Enter => {
                     if !buf.is_empty() {
-                        self.taste_profiles.push(TasteProfile { name: buf });
+                        let id = db::insert_taste_profile(&self.conn, &buf)
+                            .expect("db insert taste");
+                        self.taste_profiles.push(TasteProfile { id, name: buf });
                         self.taste_selected = self.taste_profiles.len() - 1;
                         self.taste_mode = ProfileMode::Browse;
                     }
@@ -271,6 +289,8 @@ impl App {
                 }
                 KeyCode::Char('d') | KeyCode::Delete => {
                     if !self.display_profiles.is_empty() {
+                        let id = self.display_profiles[self.display_selected].id;
+                        db::delete_display_profile(&self.conn, id).expect("db delete display");
                         self.display_profiles.remove(self.display_selected);
                         if self.display_selected > 0
                             && self.display_selected >= self.display_profiles.len()
@@ -295,7 +315,9 @@ impl App {
                 }
                 KeyCode::Enter => {
                     if !buf.is_empty() {
-                        self.display_profiles.push(DisplayProfile { name: buf });
+                        let id = db::insert_display_profile(&self.conn, &buf)
+                            .expect("db insert display");
+                        self.display_profiles.push(DisplayProfile { id, name: buf });
                         self.display_selected = self.display_profiles.len() - 1;
                         self.display_mode = ProfileMode::Browse;
                     }

@@ -1,4 +1,5 @@
 mod app;
+mod db;
 mod ui;
 
 use anyhow::Result;
@@ -34,7 +35,7 @@ fn main() -> Result<()> {
 }
 
 fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<()> {
-    let mut app = App::new();
+    let mut app = App::new()?;
 
     loop {
         terminal.draw(|frame| ui::draw(frame, &app))?;
