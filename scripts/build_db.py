@@ -24,6 +24,7 @@ import os
 import re
 import sys
 import time
+import random
 import argparse
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -198,20 +199,45 @@ def _get_session() -> "requests.Session":
 
 
 def _fetch_one(object_id: int):
-    """Fetch a single object from the Met API. Returns (object_id, url, error)."""
+    """Fetch a single object from the Met API. Returns (object_id, url, error).
+    Retries with exponential backoff on 403 (rate limit) or transient errors.
+    """
     if _cancel.is_set():
         return object_id, None, "cancelled"
-    try:
-        resp = _get_session().get(f"{MET_API_BASE}/{object_id}", timeout=15)
-        if resp.status_code == 200:
-            data = resp.json()
-            url = data.get("primaryImageSmall") or data.get("primaryImage") or ""
-            return object_id, url, None
-        if resp.status_code == 404:
-            return object_id, "", None
-        return object_id, None, f"HTTP {resp.status_code}"
-    except Exception as e:
-        return object_id, None, str(e)
+
+    wait = 2.0
+    max_retries = 6  # up to ~2+4+8+16+32+64 = 126 s total sleep before giving up
+
+    for attempt in range(max_retries + 1):
+        if _cancel.is_set():
+            return object_id, None, "cancelled"
+        try:
+            resp = _get_session().get(f"{MET_API_BASE}/{object_id}", timeout=15)
+            if resp.status_code == 200:
+                data = resp.json()
+                url = data.get("primaryImageSmall") or data.get("primaryImage") or ""
+                return object_id, url, None
+            if resp.status_code == 404:
+                return object_id, "", None
+            if resp.status_code == 403:
+                if attempt < max_retries:
+                    # Jitter ±25 % so workers don't all wake up together
+                    sleep_for = wait + random.uniform(-wait * 0.25, wait * 0.25)
+                    print(f"  [rate limited] {object_id}: backing off {sleep_for:.1f}s "
+                          f"(attempt {attempt + 1}/{max_retries})")
+                    time.sleep(sleep_for)
+                    wait = min(wait * 2, 64.0)
+                    continue
+                return object_id, None, "403 after max retries"
+            return object_id, None, f"HTTP {resp.status_code}"
+        except Exception as e:
+            if attempt < max_retries:
+                time.sleep(wait + random.uniform(0, 1.0))
+                wait = min(wait * 2, 64.0)
+                continue
+            return object_id, None, str(e)
+
+    return object_id, None, "max retries exceeded"
 
 
 def cmd_fetch_images(workers: int, limit: int | None, department: str | None):
