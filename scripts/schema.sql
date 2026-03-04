@@ -27,7 +27,10 @@ CREATE TABLE IF NOT EXISTS artworks (
 
     -- Image access
     image_url         TEXT,    -- primary image URL from the Met API
-    is_public_domain  INTEGER  -- 0 or 1 (boolean)
+    is_public_domain  INTEGER, -- 0 or 1 (boolean)
+
+    -- Extracted year for date-range filtering (first 4-digit year from date_display)
+    year_approx       INTEGER  -- e.g. 1889
 );
 
 -- Full-text search virtual table over the fields users might query by interest
