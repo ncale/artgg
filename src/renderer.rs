@@ -9,10 +9,15 @@ use crate::collection::Artwork;
 // ---------------------------------------------------------------------------
 
 pub fn load_font() -> Option<fontdue::Font> {
+    const BYTES: &[u8] = include_bytes!("../assets/fonts/LibreBaskerville.ttf");
+    if let Ok(font) = fontdue::Font::from_bytes(BYTES, fontdue::FontSettings::default()) {
+        return Some(font);
+    }
+
     let home = env::var("HOME").unwrap_or_default();
 
     let candidates: Vec<String> = vec![
-        // Project-relative (dev)
+        // Project-relative (dev) — highest priority for custom fonts
         "assets/fonts/font.ttf".to_string(),
         // User data dir
         format!("{}/.local/share/artgg/font.ttf", home),
