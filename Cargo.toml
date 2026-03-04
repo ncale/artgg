@@ -17,3 +17,14 @@ ratatui = "0.27"
 crossterm = "0.27"
 anyhow = "1"
 rusqlite = { version = "0.31", features = ["bundled"] }
+
+# Image processing
+image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
+fontdue = "0.9"
+
+# HTTP for downloading artwork images
+reqwest = { version = "0.11", features = ["blocking", "json"] }
+
+# JSON for Met API responses
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"

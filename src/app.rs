@@ -2,8 +2,27 @@ use anyhow::Result;
 use crossterm::event::KeyCode;
 use rusqlite::Connection;
 use std::env;
+use std::sync::mpsc::Receiver;
 
+use crate::build::{self, BuildParams};
+use crate::collection;
 use crate::db;
+
+// ---------------------------------------------------------------------------
+// Build progress messages (sent from build thread → main thread)
+// ---------------------------------------------------------------------------
+
+#[derive(Debug)]
+pub enum BuildMessage {
+    Phase(String),
+    Progress { current: usize, total: usize, message: String },
+    Done { produced: usize, skipped: usize, output_dir: String },
+    Error(String),
+}
+
+// ---------------------------------------------------------------------------
+// Screen / mode enums
+// ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Screen {
@@ -13,28 +32,26 @@ pub enum Screen {
     Build,
 }
 
-/// Mode for the Taste Profiles screen.
 #[derive(Debug, Clone, PartialEq)]
 pub enum TasteScreenMode {
     Browse,
     Detail,
-    EditingDate(String),         // typing year for existing profile
-    SelectingKeywords,           // keyword picker for existing profile
-    CreatingProfile,             // creation form (navigating fields 0-4)
-    CreatingEditDate(String),    // typing year inside creation form
-    CreatingSelectKeywords,      // keyword picker inside creation form
-    CreatingName(String),        // typing name — last step of creation
+    EditingDate(String),
+    SelectingKeywords,
+    CreatingProfile,
+    CreatingEditDate(String),
+    CreatingSelectKeywords,
+    CreatingName(String),
 }
 
-/// Mode for the Display Profiles screen.
 #[derive(Debug, Clone, PartialEq)]
 pub enum DisplayScreenMode {
     Browse,
     Detail,
-    EditingText(String),         // typing text for existing profile (color or ratio)
-    CreatingProfile,             // creation form (navigating fields 0-4)
-    CreatingEditText(String),    // typing text inside creation form
-    CreatingName(String),        // typing name — last step of creation
+    EditingText(String),
+    CreatingProfile,
+    CreatingEditText(String),
+    CreatingName(String),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -42,7 +59,14 @@ pub enum BuildStep {
     PickTaste,
     PickDisplay,
     PickOutputDir,
+    PickCount,
+    Running,
+    Done,
 }
+
+// ---------------------------------------------------------------------------
+// Profile structs
+// ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone)]
 pub struct TasteProfile {
@@ -60,11 +84,15 @@ pub struct DisplayProfile {
     pub name: String,
     pub wallpaper_color: String,
     pub frame_style: String,
-    pub orientation: String,   // "horizontal" or "vertical"
-    pub aspect_ratio: String,
+    pub orientation: String,
+    pub canvas_width: u32,
+    pub canvas_height: u32,
 }
 
-/// Draft state held while creating a new taste profile.
+// ---------------------------------------------------------------------------
+// Draft structs (used while creating a new profile)
+// ---------------------------------------------------------------------------
+
 #[derive(Debug, Clone)]
 pub struct TasteProfileDraft {
     pub date_start: Option<i64>,
@@ -80,7 +108,7 @@ impl Default for TasteProfileDraft {
         Self {
             date_start: None,
             date_end: None,
-            is_public_domain: true, // default Yes
+            is_public_domain: true,
             keywords: vec![],
             name: String::new(),
             current_field: 0,
@@ -88,29 +116,34 @@ impl Default for TasteProfileDraft {
     }
 }
 
-/// Draft state held while creating a new display profile.
 #[derive(Debug, Clone)]
 pub struct DisplayProfileDraft {
     pub wallpaper_color: String,
     pub frame_style: String,
     pub orientation: String,
-    pub aspect_ratio: String,
+    pub canvas_width: String,
+    pub canvas_height: String,
     pub name: String,
-    pub current_field: usize, // 0=color 1=frame 2=orientation 3=ratio 4=name
+    pub current_field: usize, // 0=color 1=frame 2=orientation 3=width 4=height 5=name
 }
 
 impl Default for DisplayProfileDraft {
     fn default() -> Self {
         Self {
-            wallpaper_color: "#FFFFFF".to_string(),
+            wallpaper_color: "#1A1A2E".to_string(),
             frame_style: String::new(),
             orientation: "horizontal".to_string(),
-            aspect_ratio: "16:9".to_string(),
+            canvas_width: "1920".to_string(),
+            canvas_height: "1080".to_string(),
             name: String::new(),
             current_field: 0,
         }
     }
 }
+
+// ---------------------------------------------------------------------------
+// Main menu
+// ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum MainItem {
@@ -132,27 +165,21 @@ impl MainItem {
 
     pub fn label(&self) -> &'static str {
         match self {
-            MainItem::TasteProfiles => "Taste Profiles",
+            MainItem::TasteProfiles  => "Taste Profiles",
             MainItem::DisplayProfiles => "Display Profiles",
-            MainItem::Build => "Build",
-            MainItem::Prune => "Prune",
-            MainItem::Exit => "Exit",
+            MainItem::Build          => "Build",
+            MainItem::Prune          => "Prune",
+            MainItem::Exit           => "Exit",
         }
     }
 
     pub fn description(&self) -> &'static str {
         match self {
-            MainItem::TasteProfiles => {
-                "Manage your art taste profiles (subjects, styles, periods)"
-            }
-            MainItem::DisplayProfiles => {
-                "Manage your display profiles (resolution, aspect ratio, frame)"
-            }
-            MainItem::Build => {
-                "Build a wallpaper gallery by picking a taste + display profile"
-            }
-            MainItem::Prune => "Remove old images based on retention limits (coming soon)",
-            MainItem::Exit => "Exit artgg",
+            MainItem::TasteProfiles  => "Manage your art taste profiles (subjects, styles, periods)",
+            MainItem::DisplayProfiles => "Manage your display profiles (resolution, color, frame)",
+            MainItem::Build          => "Build a wallpaper gallery by picking a taste + display profile",
+            MainItem::Prune          => "Remove old images based on retention limits (coming soon)",
+            MainItem::Exit           => "Exit artgg",
         }
     }
 
@@ -160,6 +187,10 @@ impl MainItem {
         matches!(self, MainItem::Prune)
     }
 }
+
+// ---------------------------------------------------------------------------
+// App state
+// ---------------------------------------------------------------------------
 
 pub struct App {
     pub screen: Screen,
@@ -172,7 +203,7 @@ pub struct App {
     pub taste_profiles: Vec<TasteProfile>,
     pub taste_selected: usize,
     pub taste_mode: TasteScreenMode,
-    pub taste_detail_field: usize, // 0=date_start 1=date_end 2=pd 3=keywords 4=artists
+    pub taste_detail_field: usize,
     pub available_keywords: Vec<(i64, String)>,
     pub keyword_cursor: usize,
     pub new_taste_draft: TasteProfileDraft,
@@ -181,7 +212,7 @@ pub struct App {
     pub display_profiles: Vec<DisplayProfile>,
     pub display_selected: usize,
     pub display_mode: DisplayScreenMode,
-    pub display_detail_field: usize, // 0=color 1=frame 2=orientation 3=ratio
+    pub display_detail_field: usize, // 0=color 1=frame 2=orientation 3=width 4=height
     pub new_display_draft: DisplayProfileDraft,
 
     // Build wizard
@@ -189,26 +220,36 @@ pub struct App {
     pub build_taste_idx: usize,
     pub build_display_idx: usize,
     pub build_output_dir: String,
+    pub build_count_str: String,
 
-    // Database
+    // Build progress (Running / Done state)
+    pub build_rx: Option<Receiver<BuildMessage>>,
+    pub build_log: Vec<String>,
+    pub build_progress: (usize, usize), // (current, total)
+    pub build_phase: String,
+    pub build_produced: usize,
+    pub build_skipped: usize,
+    pub build_done_dir: String,
+
+    // Database (user data)
     pub conn: Connection,
 }
 
 impl App {
     pub fn new() -> Result<Self> {
-        let default_output_dir = env::var("HOME")
-            .map(|h| format!("{}/.local/share/artgg/gallery", h))
-            .unwrap_or_else(|_| "~/.local/share/artgg/gallery".to_string());
+        let home = env::var("HOME").unwrap_or_else(|_| "~".to_string());
+        let default_output_dir = format!("{}/.local/share/artgg/gallery", home);
 
         let conn = db::open()?;
-        let taste_profiles = db::load_taste_profiles(&conn)?;
-        let display_profiles = db::load_display_profiles(&conn)?;
+        let taste_profiles    = db::load_taste_profiles(&conn)?;
+        let display_profiles  = db::load_display_profiles(&conn)?;
         let available_keywords = db::load_keywords(&conn)?;
 
         Ok(Self {
             screen: Screen::Main,
             should_quit: false,
             main_selected: 0,
+
             taste_profiles,
             taste_selected: 0,
             taste_mode: TasteScreenMode::Browse,
@@ -216,51 +257,103 @@ impl App {
             available_keywords,
             keyword_cursor: 0,
             new_taste_draft: TasteProfileDraft::default(),
+
             display_profiles,
             display_selected: 0,
             display_mode: DisplayScreenMode::Browse,
             display_detail_field: 0,
             new_display_draft: DisplayProfileDraft::default(),
+
             build_step: BuildStep::PickTaste,
             build_taste_idx: 0,
             build_display_idx: 0,
             build_output_dir: default_output_dir,
+            build_count_str: "20".to_string(),
+
+            build_rx: None,
+            build_log: Vec::new(),
+            build_progress: (0, 0),
+            build_phase: String::new(),
+            build_produced: 0,
+            build_skipped: 0,
+            build_done_dir: String::new(),
+
             conn,
         })
     }
 
-    pub fn handle_key(&mut self, key: KeyCode) {
-        match self.screen {
-            Screen::Main => self.handle_main(key),
-            Screen::TasteProfiles => self.handle_taste(key),
-            Screen::DisplayProfiles => self.handle_display(key),
-            Screen::Build => self.handle_build(key),
+    // ── Channel polling (called every loop tick) ───────────────────────────
+
+    pub fn poll_build_messages(&mut self) {
+        loop {
+            let msg = match self.build_rx.as_ref() {
+                Some(rx) => match rx.try_recv() {
+                    Ok(m) => m,
+                    Err(_) => break,
+                },
+                None => break,
+            };
+
+            match msg {
+                BuildMessage::Phase(s) => {
+                    self.build_phase = s.clone();
+                    self.push_log(s);
+                }
+                BuildMessage::Progress { current, total, message } => {
+                    self.build_progress = (current, total);
+                    self.push_log(message);
+                }
+                BuildMessage::Done { produced, skipped, output_dir } => {
+                    self.build_produced  = produced;
+                    self.build_skipped   = skipped;
+                    self.build_done_dir  = output_dir;
+                    self.build_step = BuildStep::Done;
+                    self.build_rx = None;
+                }
+                BuildMessage::Error(e) => {
+                    self.push_log(format!("ERROR: {}", e));
+                    self.build_step = BuildStep::Done;
+                    self.build_rx = None;
+                }
+            }
         }
     }
 
+    fn push_log(&mut self, msg: String) {
+        self.build_log.push(msg);
+        if self.build_log.len() > 200 {
+            self.build_log.drain(..100);
+        }
+    }
+
+    // ── Key dispatcher ─────────────────────────────────────────────────────
+
+    pub fn handle_key(&mut self, key: KeyCode) {
+        match self.screen {
+            Screen::Main          => self.handle_main(key),
+            Screen::TasteProfiles  => self.handle_taste(key),
+            Screen::DisplayProfiles => self.handle_display(key),
+            Screen::Build          => self.handle_build(key),
+        }
+    }
+
+    // ── Main menu ──────────────────────────────────────────────────────────
+
     fn handle_main(&mut self, key: KeyCode) {
         match key {
-            KeyCode::Up | KeyCode::Char('k') => self.main_move_up(),
+            KeyCode::Up | KeyCode::Char('k')   => self.main_move_up(),
             KeyCode::Down | KeyCode::Char('j') => self.main_move_down(),
-            KeyCode::Enter => self.main_activate(),
-            KeyCode::Char('q') | KeyCode::Esc => self.should_quit = true,
+            KeyCode::Enter                     => self.main_activate(),
+            KeyCode::Char('q') | KeyCode::Esc  => self.should_quit = true,
             _ => {}
         }
     }
 
     fn main_move_up(&mut self) {
         let items = MainItem::ALL;
-        let mut idx = if self.main_selected == 0 {
-            items.len() - 1
-        } else {
-            self.main_selected - 1
-        };
+        let mut idx = if self.main_selected == 0 { items.len() - 1 } else { self.main_selected - 1 };
         while items[idx].is_disabled() {
-            if idx == 0 {
-                idx = items.len() - 1;
-            } else {
-                idx -= 1;
-            }
+            idx = if idx == 0 { items.len() - 1 } else { idx - 1 };
         }
         self.main_selected = idx;
     }
@@ -268,15 +361,13 @@ impl App {
     fn main_move_down(&mut self) {
         let items = MainItem::ALL;
         let mut idx = (self.main_selected + 1) % items.len();
-        while items[idx].is_disabled() {
-            idx = (idx + 1) % items.len();
-        }
+        while items[idx].is_disabled() { idx = (idx + 1) % items.len(); }
         self.main_selected = idx;
     }
 
     fn main_activate(&mut self) {
         match MainItem::ALL[self.main_selected] {
-            MainItem::TasteProfiles => {
+            MainItem::TasteProfiles  => {
                 self.screen = Screen::TasteProfiles;
                 self.taste_mode = TasteScreenMode::Browse;
             }
@@ -291,11 +382,11 @@ impl App {
                 self.screen = Screen::Build;
             }
             MainItem::Prune => {}
-            MainItem::Exit => self.should_quit = true,
+            MainItem::Exit  => self.should_quit = true,
         }
     }
 
-    // ─── Taste profiles ──────────────────────────────────────────────────────
+    // ── Taste profiles ─────────────────────────────────────────────────────
 
     fn handle_taste(&mut self, key: KeyCode) {
         match self.taste_mode.clone() {
@@ -327,77 +418,54 @@ impl App {
                         let id = self.taste_profiles[self.taste_selected].id;
                         db::delete_taste_profile(&self.conn, id).expect("db delete taste");
                         self.taste_profiles.remove(self.taste_selected);
-                        if self.taste_selected > 0
-                            && self.taste_selected >= self.taste_profiles.len()
-                        {
+                        if self.taste_selected > 0 && self.taste_selected >= self.taste_profiles.len() {
                             self.taste_selected = self.taste_profiles.len() - 1;
                         }
                     }
                 }
-                KeyCode::Esc => {
-                    self.screen = Screen::Main;
-                }
+                KeyCode::Esc => { self.screen = Screen::Main; }
                 _ => {}
             },
 
             TasteScreenMode::Detail => match key {
                 KeyCode::Up | KeyCode::Char('k') => {
-                    if self.taste_detail_field > 0 {
-                        self.taste_detail_field -= 1;
-                    }
+                    if self.taste_detail_field > 0 { self.taste_detail_field -= 1; }
                 }
                 KeyCode::Down | KeyCode::Char('j') => {
-                    if self.taste_detail_field < 4 {
-                        self.taste_detail_field += 1;
-                    }
+                    if self.taste_detail_field < 4 { self.taste_detail_field += 1; }
                 }
                 KeyCode::Enter => match self.taste_detail_field {
                     0 => {
-                        let val = self.taste_profiles[self.taste_selected]
-                            .date_start
-                            .map(|v| v.to_string())
-                            .unwrap_or_default();
+                        let val = self.taste_profiles[self.taste_selected].date_start
+                            .map(|v| v.to_string()).unwrap_or_default();
                         self.taste_mode = TasteScreenMode::EditingDate(val);
                     }
                     1 => {
-                        let val = self.taste_profiles[self.taste_selected]
-                            .date_end
-                            .map(|v| v.to_string())
-                            .unwrap_or_default();
+                        let val = self.taste_profiles[self.taste_selected].date_end
+                            .map(|v| v.to_string()).unwrap_or_default();
                         self.taste_mode = TasteScreenMode::EditingDate(val);
                     }
                     2 => self.toggle_public_domain(),
-                    3 => {
-                        self.taste_mode = TasteScreenMode::SelectingKeywords;
-                        self.keyword_cursor = 0;
-                    }
-                    _ => {} // 4 = artists, no-op
+                    3 => { self.taste_mode = TasteScreenMode::SelectingKeywords; self.keyword_cursor = 0; }
+                    _ => {}
                 },
                 KeyCode::Char('e') => match self.taste_detail_field {
                     0 => {
-                        let val = self.taste_profiles[self.taste_selected]
-                            .date_start
-                            .map(|v| v.to_string())
-                            .unwrap_or_default();
+                        let val = self.taste_profiles[self.taste_selected].date_start
+                            .map(|v| v.to_string()).unwrap_or_default();
                         self.taste_mode = TasteScreenMode::EditingDate(val);
                     }
                     1 => {
-                        let val = self.taste_profiles[self.taste_selected]
-                            .date_end
-                            .map(|v| v.to_string())
-                            .unwrap_or_default();
+                        let val = self.taste_profiles[self.taste_selected].date_end
+                            .map(|v| v.to_string()).unwrap_or_default();
                         self.taste_mode = TasteScreenMode::EditingDate(val);
                     }
                     _ => {}
                 },
                 KeyCode::Char(' ') => {
-                    if self.taste_detail_field == 2 {
-                        self.toggle_public_domain();
-                    }
+                    if self.taste_detail_field == 2 { self.toggle_public_domain(); }
                 }
-                KeyCode::Esc => {
-                    self.taste_mode = TasteScreenMode::Browse;
-                }
+                KeyCode::Esc => { self.taste_mode = TasteScreenMode::Browse; }
                 _ => {}
             },
 
@@ -419,28 +487,23 @@ impl App {
                     let idx = self.taste_selected;
                     match self.taste_detail_field {
                         0 => self.taste_profiles[idx].date_start = value,
-                        1 => self.taste_profiles[idx].date_end = value,
+                        1 => self.taste_profiles[idx].date_end   = value,
                         _ => {}
                     }
                     let (id, ds, de, pd) = {
                         let p = &self.taste_profiles[idx];
                         (p.id, p.date_start, p.date_end, p.is_public_domain)
                     };
-                    db::update_taste_profile_fields(&self.conn, id, ds, de, pd)
-                        .expect("db update taste fields");
+                    db::update_taste_profile_fields(&self.conn, id, ds, de, pd).expect("db update taste");
                     self.taste_mode = TasteScreenMode::Detail;
                 }
-                KeyCode::Esc => {
-                    self.taste_mode = TasteScreenMode::Detail;
-                }
+                KeyCode::Esc => { self.taste_mode = TasteScreenMode::Detail; }
                 _ => {}
             },
 
             TasteScreenMode::SelectingKeywords => match key {
                 KeyCode::Up | KeyCode::Char('k') => {
-                    if self.keyword_cursor > 0 {
-                        self.keyword_cursor -= 1;
-                    }
+                    if self.keyword_cursor > 0 { self.keyword_cursor -= 1; }
                 }
                 KeyCode::Down | KeyCode::Char('j') => {
                     if !self.available_keywords.is_empty()
@@ -449,16 +512,10 @@ impl App {
                         self.keyword_cursor += 1;
                     }
                 }
-                KeyCode::Char(' ') | KeyCode::Enter => {
-                    self.toggle_keyword();
-                }
-                KeyCode::Esc => {
-                    self.taste_mode = TasteScreenMode::Detail;
-                }
+                KeyCode::Char(' ') | KeyCode::Enter => { self.toggle_keyword(); }
+                KeyCode::Esc => { self.taste_mode = TasteScreenMode::Detail; }
                 _ => {}
             },
-
-            // ── Creating flow ──────────────────────────────────────────────
 
             TasteScreenMode::CreatingProfile => match key {
                 KeyCode::Up | KeyCode::Char('k') => {
@@ -473,25 +530,15 @@ impl App {
                 }
                 KeyCode::Enter => match self.new_taste_draft.current_field {
                     0 => {
-                        let val = self.new_taste_draft.date_start
-                            .map(|v| v.to_string())
-                            .unwrap_or_default();
+                        let val = self.new_taste_draft.date_start.map(|v| v.to_string()).unwrap_or_default();
                         self.taste_mode = TasteScreenMode::CreatingEditDate(val);
                     }
                     1 => {
-                        let val = self.new_taste_draft.date_end
-                            .map(|v| v.to_string())
-                            .unwrap_or_default();
+                        let val = self.new_taste_draft.date_end.map(|v| v.to_string()).unwrap_or_default();
                         self.taste_mode = TasteScreenMode::CreatingEditDate(val);
                     }
-                    2 => {
-                        self.new_taste_draft.is_public_domain =
-                            !self.new_taste_draft.is_public_domain;
-                    }
-                    3 => {
-                        self.keyword_cursor = 0;
-                        self.taste_mode = TasteScreenMode::CreatingSelectKeywords;
-                    }
+                    2 => { self.new_taste_draft.is_public_domain = !self.new_taste_draft.is_public_domain; }
+                    3 => { self.keyword_cursor = 0; self.taste_mode = TasteScreenMode::CreatingSelectKeywords; }
                     4 => {
                         let start = self.new_taste_draft.name.clone();
                         self.taste_mode = TasteScreenMode::CreatingName(start);
@@ -500,13 +547,10 @@ impl App {
                 },
                 KeyCode::Char(' ') => {
                     if self.new_taste_draft.current_field == 2 {
-                        self.new_taste_draft.is_public_domain =
-                            !self.new_taste_draft.is_public_domain;
+                        self.new_taste_draft.is_public_domain = !self.new_taste_draft.is_public_domain;
                     }
                 }
-                KeyCode::Esc => {
-                    self.taste_mode = TasteScreenMode::Browse;
-                }
+                KeyCode::Esc => { self.taste_mode = TasteScreenMode::Browse; }
                 _ => {}
             },
 
@@ -527,22 +571,18 @@ impl App {
                     let value: Option<i64> = if buf.is_empty() { None } else { buf.parse().ok() };
                     match self.new_taste_draft.current_field {
                         0 => self.new_taste_draft.date_start = value,
-                        1 => self.new_taste_draft.date_end = value,
+                        1 => self.new_taste_draft.date_end   = value,
                         _ => {}
                     }
                     self.taste_mode = TasteScreenMode::CreatingProfile;
                 }
-                KeyCode::Esc => {
-                    self.taste_mode = TasteScreenMode::CreatingProfile;
-                }
+                KeyCode::Esc => { self.taste_mode = TasteScreenMode::CreatingProfile; }
                 _ => {}
             },
 
             TasteScreenMode::CreatingSelectKeywords => match key {
                 KeyCode::Up | KeyCode::Char('k') => {
-                    if self.keyword_cursor > 0 {
-                        self.keyword_cursor -= 1;
-                    }
+                    if self.keyword_cursor > 0 { self.keyword_cursor -= 1; }
                 }
                 KeyCode::Down | KeyCode::Char('j') => {
                     if !self.available_keywords.is_empty()
@@ -551,61 +591,36 @@ impl App {
                         self.keyword_cursor += 1;
                     }
                 }
-                KeyCode::Char(' ') | KeyCode::Enter => {
-                    self.toggle_keyword_in_draft();
-                }
-                KeyCode::Esc => {
-                    self.taste_mode = TasteScreenMode::CreatingProfile;
-                }
+                KeyCode::Char(' ') | KeyCode::Enter => { self.toggle_keyword_in_draft(); }
+                KeyCode::Esc => { self.taste_mode = TasteScreenMode::CreatingProfile; }
                 _ => {}
             },
 
             TasteScreenMode::CreatingName(mut buf) => match key {
-                KeyCode::Char(c) => {
-                    buf.push(c);
-                    self.taste_mode = TasteScreenMode::CreatingName(buf);
-                }
-                KeyCode::Backspace => {
-                    buf.pop();
-                    self.taste_mode = TasteScreenMode::CreatingName(buf);
-                }
+                KeyCode::Char(c) => { buf.push(c); self.taste_mode = TasteScreenMode::CreatingName(buf); }
+                KeyCode::Backspace => { buf.pop(); self.taste_mode = TasteScreenMode::CreatingName(buf); }
                 KeyCode::Enter => {
                     if !buf.is_empty() {
-                        let date_start = self.new_taste_draft.date_start;
-                        let date_end = self.new_taste_draft.date_end;
+                        let date_start     = self.new_taste_draft.date_start;
+                        let date_end       = self.new_taste_draft.date_end;
                         let is_public_domain = self.new_taste_draft.is_public_domain;
-                        let keywords = std::mem::take(&mut self.new_taste_draft.keywords);
+                        let keywords       = std::mem::take(&mut self.new_taste_draft.keywords);
                         let id = db::insert_taste_profile(
-                            &self.conn,
-                            &buf,
-                            date_start,
-                            date_end,
-                            is_public_domain,
-                        )
-                        .expect("db insert taste");
+                            &self.conn, &buf, date_start, date_end, is_public_domain,
+                        ).expect("db insert taste");
                         for kw_val in &keywords {
-                            if let Some((kw_id, _)) =
-                                self.available_keywords.iter().find(|(_, v)| v == kw_val)
-                            {
-                                let kw_id = *kw_id;
-                                db::add_taste_profile_keyword(&self.conn, id, kw_id)
-                                    .expect("db add keyword");
+                            if let Some((kw_id, _)) = self.available_keywords.iter().find(|(_, v)| v == kw_val) {
+                                db::add_taste_profile_keyword(&self.conn, id, *kw_id).expect("db add kw");
                             }
                         }
                         self.taste_profiles.push(TasteProfile {
-                            id,
-                            name: buf,
-                            date_start,
-                            date_end,
-                            is_public_domain,
-                            keywords,
+                            id, name: buf, date_start, date_end, is_public_domain, keywords,
                         });
                         self.taste_selected = self.taste_profiles.len() - 1;
                         self.taste_mode = TasteScreenMode::Browse;
                     }
                 }
                 KeyCode::Esc => {
-                    // Save partial name so it's restored if user returns
                     self.new_taste_draft.name = buf;
                     self.new_taste_draft.current_field = 4;
                     self.taste_mode = TasteScreenMode::CreatingProfile;
@@ -626,28 +641,22 @@ impl App {
     }
 
     fn toggle_keyword(&mut self) {
-        if self.available_keywords.is_empty() {
-            return;
-        }
+        if self.available_keywords.is_empty() { return; }
         let (kw_id, kw_val) = self.available_keywords[self.keyword_cursor].clone();
         let idx = self.taste_selected;
         if self.taste_profiles[idx].keywords.contains(&kw_val) {
             self.taste_profiles[idx].keywords.retain(|k| k != &kw_val);
-            let profile_id = self.taste_profiles[idx].id;
-            db::remove_taste_profile_keyword(&self.conn, profile_id, kw_id)
-                .expect("db remove keyword");
+            let pid = self.taste_profiles[idx].id;
+            db::remove_taste_profile_keyword(&self.conn, pid, kw_id).expect("db rm kw");
         } else if self.taste_profiles[idx].keywords.len() < 10 {
             self.taste_profiles[idx].keywords.push(kw_val);
-            let profile_id = self.taste_profiles[idx].id;
-            db::add_taste_profile_keyword(&self.conn, profile_id, kw_id)
-                .expect("db add keyword");
+            let pid = self.taste_profiles[idx].id;
+            db::add_taste_profile_keyword(&self.conn, pid, kw_id).expect("db add kw");
         }
     }
 
     fn toggle_keyword_in_draft(&mut self) {
-        if self.available_keywords.is_empty() {
-            return;
-        }
+        if self.available_keywords.is_empty() { return; }
         let (_, kw_val) = self.available_keywords[self.keyword_cursor].clone();
         if self.new_taste_draft.keywords.contains(&kw_val) {
             self.new_taste_draft.keywords.retain(|k| k != &kw_val);
@@ -656,9 +665,10 @@ impl App {
         }
     }
 
-    // ─── Display profiles ─────────────────────────────────────────────────────
+    // ── Display profiles ───────────────────────────────────────────────────
 
     fn handle_display(&mut self, key: KeyCode) {
+        // Max detail field index: 4 (0=color 1=frame 2=orient 3=width 4=height)
         match self.display_mode.clone() {
             DisplayScreenMode::Browse => match key {
                 KeyCode::Up | KeyCode::Char('k') => {
@@ -695,110 +705,70 @@ impl App {
                         }
                     }
                 }
-                KeyCode::Esc => {
-                    self.screen = Screen::Main;
-                }
+                KeyCode::Esc => { self.screen = Screen::Main; }
                 _ => {}
             },
 
             DisplayScreenMode::Detail => match key {
                 KeyCode::Up | KeyCode::Char('k') => {
-                    if self.display_detail_field > 0 {
-                        self.display_detail_field -= 1;
-                    }
+                    if self.display_detail_field > 0 { self.display_detail_field -= 1; }
                 }
                 KeyCode::Down | KeyCode::Char('j') => {
-                    if self.display_detail_field < 3 {
-                        self.display_detail_field += 1;
-                    }
+                    if self.display_detail_field < 4 { self.display_detail_field += 1; }
                 }
-                KeyCode::Enter => match self.display_detail_field {
+                KeyCode::Enter | KeyCode::Char('e') => match self.display_detail_field {
                     0 => {
-                        let val = self.display_profiles[self.display_selected]
-                            .wallpaper_color
-                            .clone();
-                        self.display_mode = DisplayScreenMode::EditingText(val);
+                        let v = self.display_profiles[self.display_selected].wallpaper_color.clone();
+                        self.display_mode = DisplayScreenMode::EditingText(v);
                     }
                     1 => {} // frame style — disabled
                     2 => self.toggle_orientation(),
                     3 => {
-                        let val = self.display_profiles[self.display_selected]
-                            .aspect_ratio
-                            .clone();
-                        self.display_mode = DisplayScreenMode::EditingText(val);
+                        let v = self.display_profiles[self.display_selected].canvas_width.to_string();
+                        self.display_mode = DisplayScreenMode::EditingText(v);
                     }
-                    _ => {}
-                },
-                KeyCode::Char('e') => match self.display_detail_field {
-                    0 => {
-                        let val = self.display_profiles[self.display_selected]
-                            .wallpaper_color
-                            .clone();
-                        self.display_mode = DisplayScreenMode::EditingText(val);
-                    }
-                    3 => {
-                        let val = self.display_profiles[self.display_selected]
-                            .aspect_ratio
-                            .clone();
-                        self.display_mode = DisplayScreenMode::EditingText(val);
+                    4 => {
+                        let v = self.display_profiles[self.display_selected].canvas_height.to_string();
+                        self.display_mode = DisplayScreenMode::EditingText(v);
                     }
                     _ => {}
                 },
                 KeyCode::Char(' ') => {
-                    if self.display_detail_field == 2 {
-                        self.toggle_orientation();
-                    }
+                    if self.display_detail_field == 2 { self.toggle_orientation(); }
                 }
-                KeyCode::Esc => {
-                    self.display_mode = DisplayScreenMode::Browse;
-                }
+                KeyCode::Esc => { self.display_mode = DisplayScreenMode::Browse; }
                 _ => {}
             },
 
             DisplayScreenMode::EditingText(mut buf) => match key {
-                KeyCode::Char(c) => {
-                    buf.push(c);
-                    self.display_mode = DisplayScreenMode::EditingText(buf);
-                }
-                KeyCode::Backspace => {
-                    buf.pop();
-                    self.display_mode = DisplayScreenMode::EditingText(buf);
-                }
+                KeyCode::Char(c) => { buf.push(c); self.display_mode = DisplayScreenMode::EditingText(buf); }
+                KeyCode::Backspace => { buf.pop(); self.display_mode = DisplayScreenMode::EditingText(buf); }
                 KeyCode::Enter => {
                     let idx = self.display_selected;
                     match self.display_detail_field {
                         0 => self.display_profiles[idx].wallpaper_color = buf.clone(),
-                        3 => self.display_profiles[idx].aspect_ratio = buf.clone(),
+                        3 => {
+                            if let Ok(v) = buf.parse::<u32>() {
+                                self.display_profiles[idx].canvas_width = v;
+                            }
+                        }
+                        4 => {
+                            if let Ok(v) = buf.parse::<u32>() {
+                                self.display_profiles[idx].canvas_height = v;
+                            }
+                        }
                         _ => {}
                     }
-                    let (id, color, frame, orient, ratio) = {
-                        let p = &self.display_profiles[idx];
-                        (
-                            p.id,
-                            p.wallpaper_color.clone(),
-                            p.frame_style.clone(),
-                            p.orientation.clone(),
-                            p.aspect_ratio.clone(),
-                        )
-                    };
+                    let p = &self.display_profiles[idx];
                     db::update_display_profile_fields(
-                        &self.conn,
-                        id,
-                        &color,
-                        &frame,
-                        &orient,
-                        &ratio,
-                    )
-                    .expect("db update display");
+                        &self.conn, p.id, &p.wallpaper_color, &p.frame_style,
+                        &p.orientation, p.canvas_width, p.canvas_height,
+                    ).expect("db update display");
                     self.display_mode = DisplayScreenMode::Detail;
                 }
-                KeyCode::Esc => {
-                    self.display_mode = DisplayScreenMode::Detail;
-                }
+                KeyCode::Esc => { self.display_mode = DisplayScreenMode::Detail; }
                 _ => {}
             },
-
-            // ── Creating flow ──────────────────────────────────────────────
 
             DisplayScreenMode::CreatingProfile => match key {
                 KeyCode::Up | KeyCode::Char('k') => {
@@ -807,14 +777,14 @@ impl App {
                     }
                 }
                 KeyCode::Down | KeyCode::Char('j') => {
-                    if self.new_display_draft.current_field < 4 {
+                    if self.new_display_draft.current_field < 5 {
                         self.new_display_draft.current_field += 1;
                     }
                 }
                 KeyCode::Enter => match self.new_display_draft.current_field {
                     0 => {
-                        let val = self.new_display_draft.wallpaper_color.clone();
-                        self.display_mode = DisplayScreenMode::CreatingEditText(val);
+                        let v = self.new_display_draft.wallpaper_color.clone();
+                        self.display_mode = DisplayScreenMode::CreatingEditText(v);
                     }
                     1 => {} // frame style — disabled
                     2 => {
@@ -823,10 +793,14 @@ impl App {
                             if o == "horizontal" { "vertical" } else { "horizontal" }.to_string();
                     }
                     3 => {
-                        let val = self.new_display_draft.aspect_ratio.clone();
-                        self.display_mode = DisplayScreenMode::CreatingEditText(val);
+                        let v = self.new_display_draft.canvas_width.clone();
+                        self.display_mode = DisplayScreenMode::CreatingEditText(v);
                     }
                     4 => {
+                        let v = self.new_display_draft.canvas_height.clone();
+                        self.display_mode = DisplayScreenMode::CreatingEditText(v);
+                    }
+                    5 => {
                         let default_name = self.display_default_name();
                         let start = if self.new_display_draft.name.is_empty() {
                             default_name
@@ -844,66 +818,46 @@ impl App {
                             if o == "horizontal" { "vertical" } else { "horizontal" }.to_string();
                     }
                 }
-                KeyCode::Esc => {
-                    self.display_mode = DisplayScreenMode::Browse;
-                }
+                KeyCode::Esc => { self.display_mode = DisplayScreenMode::Browse; }
                 _ => {}
             },
 
             DisplayScreenMode::CreatingEditText(mut buf) => match key {
-                KeyCode::Char(c) => {
-                    buf.push(c);
-                    self.display_mode = DisplayScreenMode::CreatingEditText(buf);
-                }
-                KeyCode::Backspace => {
-                    buf.pop();
-                    self.display_mode = DisplayScreenMode::CreatingEditText(buf);
-                }
+                KeyCode::Char(c) => { buf.push(c); self.display_mode = DisplayScreenMode::CreatingEditText(buf); }
+                KeyCode::Backspace => { buf.pop(); self.display_mode = DisplayScreenMode::CreatingEditText(buf); }
                 KeyCode::Enter => {
                     match self.new_display_draft.current_field {
                         0 => self.new_display_draft.wallpaper_color = buf,
-                        3 => self.new_display_draft.aspect_ratio = buf,
+                        3 => self.new_display_draft.canvas_width     = buf,
+                        4 => self.new_display_draft.canvas_height    = buf,
                         _ => {}
                     }
                     self.display_mode = DisplayScreenMode::CreatingProfile;
                 }
-                KeyCode::Esc => {
-                    self.display_mode = DisplayScreenMode::CreatingProfile;
-                }
+                KeyCode::Esc => { self.display_mode = DisplayScreenMode::CreatingProfile; }
                 _ => {}
             },
 
             DisplayScreenMode::CreatingName(mut buf) => match key {
-                KeyCode::Char(c) => {
-                    buf.push(c);
-                    self.display_mode = DisplayScreenMode::CreatingName(buf);
-                }
-                KeyCode::Backspace => {
-                    buf.pop();
-                    self.display_mode = DisplayScreenMode::CreatingName(buf);
-                }
+                KeyCode::Char(c) => { buf.push(c); self.display_mode = DisplayScreenMode::CreatingName(buf); }
+                KeyCode::Backspace => { buf.pop(); self.display_mode = DisplayScreenMode::CreatingName(buf); }
                 KeyCode::Enter => {
                     if !buf.is_empty() {
-                        let color = self.new_display_draft.wallpaper_color.clone();
-                        let frame = self.new_display_draft.frame_style.clone();
-                        let orient = self.new_display_draft.orientation.clone();
-                        let ratio = self.new_display_draft.aspect_ratio.clone();
+                        let d = &self.new_display_draft;
+                        let w = d.canvas_width.parse::<u32>().unwrap_or(1920);
+                        let h = d.canvas_height.parse::<u32>().unwrap_or(1080);
                         let id = db::insert_display_profile(
-                            &self.conn,
-                            &buf,
-                            &color,
-                            &frame,
-                            &orient,
-                            &ratio,
-                        )
-                        .expect("db insert display");
+                            &self.conn, &buf, &d.wallpaper_color, &d.frame_style,
+                            &d.orientation, w, h,
+                        ).expect("db insert display");
                         self.display_profiles.push(DisplayProfile {
                             id,
                             name: buf,
-                            wallpaper_color: color,
-                            frame_style: frame,
-                            orientation: orient,
-                            aspect_ratio: ratio,
+                            wallpaper_color: d.wallpaper_color.clone(),
+                            frame_style: d.frame_style.clone(),
+                            orientation: d.orientation.clone(),
+                            canvas_width: w,
+                            canvas_height: h,
                         });
                         self.display_selected = self.display_profiles.len() - 1;
                         self.display_mode = DisplayScreenMode::Browse;
@@ -911,7 +865,7 @@ impl App {
                 }
                 KeyCode::Esc => {
                     self.new_display_draft.name = buf;
-                    self.new_display_draft.current_field = 4;
+                    self.new_display_draft.current_field = 5;
                     self.display_mode = DisplayScreenMode::CreatingProfile;
                 }
                 _ => {}
@@ -929,42 +883,32 @@ impl App {
                 "horizontal".to_string()
             };
         }
-        let (id, color, frame, orient, ratio) = {
-            let p = &self.display_profiles[idx];
-            (
-                p.id,
-                p.wallpaper_color.clone(),
-                p.frame_style.clone(),
-                p.orientation.clone(),
-                p.aspect_ratio.clone(),
-            )
-        };
-        db::update_display_profile_fields(&self.conn, id, &color, &frame, &orient, &ratio)
-            .expect("db update display orientation");
+        let p = &self.display_profiles[idx];
+        db::update_display_profile_fields(
+            &self.conn, p.id, &p.wallpaper_color, &p.frame_style,
+            &p.orientation, p.canvas_width, p.canvas_height,
+        ).expect("db update orientation");
     }
 
-    /// Generate a human-readable default name from the current display draft.
     fn display_default_name(&self) -> String {
-        let o = &self.new_display_draft.orientation;
-        let o_cap: String = {
-            let mut chars = o.chars();
+        let d = &self.new_display_draft;
+        let o_cap = {
+            let mut chars = d.orientation.chars();
             match chars.next() {
-                None => String::new(),
+                None    => String::new(),
                 Some(c) => c.to_uppercase().collect::<String>() + chars.as_str(),
             }
         };
-        format!("{} {}", o_cap, self.new_display_draft.aspect_ratio)
+        format!("{} {}x{}", o_cap, d.canvas_width, d.canvas_height)
     }
 
-    // ─── Build wizard ─────────────────────────────────────────────────────────
+    // ── Build wizard ───────────────────────────────────────────────────────
 
     fn handle_build(&mut self, key: KeyCode) {
         match self.build_step {
             BuildStep::PickTaste => match key {
                 KeyCode::Up | KeyCode::Char('k') => {
-                    if self.build_taste_idx > 0 {
-                        self.build_taste_idx -= 1;
-                    }
+                    if self.build_taste_idx > 0 { self.build_taste_idx -= 1; }
                 }
                 KeyCode::Down | KeyCode::Char('j') => {
                     if !self.taste_profiles.is_empty()
@@ -978,16 +922,13 @@ impl App {
                         self.build_step = BuildStep::PickDisplay;
                     }
                 }
-                KeyCode::Esc => {
-                    self.screen = Screen::Main;
-                }
+                KeyCode::Esc => { self.screen = Screen::Main; }
                 _ => {}
             },
+
             BuildStep::PickDisplay => match key {
                 KeyCode::Up | KeyCode::Char('k') => {
-                    if self.build_display_idx > 0 {
-                        self.build_display_idx -= 1;
-                    }
+                    if self.build_display_idx > 0 { self.build_display_idx -= 1; }
                 }
                 KeyCode::Down | KeyCode::Char('j') => {
                     if !self.display_profiles.is_empty()
@@ -1001,26 +942,82 @@ impl App {
                         self.build_step = BuildStep::PickOutputDir;
                     }
                 }
-                KeyCode::Esc => {
-                    self.build_step = BuildStep::PickTaste;
-                }
+                KeyCode::Esc => { self.build_step = BuildStep::PickTaste; }
                 _ => {}
             },
+
             BuildStep::PickOutputDir => match key {
-                KeyCode::Char(c) => {
-                    self.build_output_dir.push(c);
-                }
-                KeyCode::Backspace => {
-                    self.build_output_dir.pop();
-                }
+                KeyCode::Char(c) => { self.build_output_dir.push(c); }
+                KeyCode::Backspace => { self.build_output_dir.pop(); }
+                KeyCode::Enter => { self.build_step = BuildStep::PickCount; }
+                KeyCode::Esc   => { self.build_step = BuildStep::PickDisplay; }
+                _ => {}
+            },
+
+            BuildStep::PickCount => match key {
+                KeyCode::Char(c) if c.is_ascii_digit() => { self.build_count_str.push(c); }
+                KeyCode::Backspace => { self.build_count_str.pop(); }
                 KeyCode::Enter => {
-                    self.screen = Screen::Main;
+                    let count = self.build_count_str.parse::<usize>().unwrap_or(20).max(1);
+                    self.start_build(count);
                 }
-                KeyCode::Esc => {
-                    self.build_step = BuildStep::PickDisplay;
+                KeyCode::Esc => { self.build_step = BuildStep::PickOutputDir; }
+                _ => {}
+            },
+
+            BuildStep::Running => match key {
+                // No-op while running; Ctrl-C is handled by the OS.
+                _ => {}
+            },
+
+            BuildStep::Done => match key {
+                KeyCode::Enter | KeyCode::Esc | KeyCode::Char('q') => {
+                    self.screen = Screen::Main;
+                    self.build_step = BuildStep::PickTaste;
+                    self.build_log.clear();
+                    self.build_phase.clear();
                 }
                 _ => {}
             },
         }
+    }
+
+    fn start_build(&mut self, count: usize) {
+        let home = env::var("HOME").unwrap_or_default();
+
+        let collection_db = collection::find_collection_db()
+            .unwrap_or_else(|| "./assets/collection.db".to_string());
+        let cache_dir    = format!("{}/.cache/artgg/images", home);
+        let artgg_db_path = db::db_path();
+
+        // Guard: need valid profile indices.
+        if self.taste_profiles.is_empty() || self.display_profiles.is_empty() { return; }
+
+        let taste   = self.taste_profiles[self.build_taste_idx].clone();
+        let display = self.display_profiles[self.build_display_idx].clone();
+
+        let params = BuildParams {
+            taste,
+            display,
+            output_dir: self.build_output_dir.clone(),
+            count,
+            collection_db_path: collection_db,
+            cache_dir,
+            artgg_db_path,
+        };
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        self.build_rx = Some(rx);
+        self.build_log.clear();
+        self.build_progress = (0, count);
+        self.build_phase = "Starting…".to_string();
+        self.build_produced = 0;
+        self.build_skipped  = 0;
+        self.build_done_dir = self.build_output_dir.clone();
+        self.build_step = BuildStep::Running;
+
+        std::thread::spawn(move || {
+            build::run(params, tx);
+        });
     }
 }
