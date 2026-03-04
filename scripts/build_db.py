@@ -25,6 +25,8 @@ import re
 import sys
 import time
 import argparse
+import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 try:
     import requests
@@ -180,9 +182,39 @@ def cmd_build():
 
 
 # ---------------------------------------------------------------------------
-# Command: fetch-images
+# Command: fetch-images  (concurrent)
 # ---------------------------------------------------------------------------
-def cmd_fetch_images(delay: float, limit: int | None):
+
+_thread_local = threading.local()
+_cancel = threading.Event()
+
+
+def _get_session() -> "requests.Session":
+    if not hasattr(_thread_local, "session"):
+        s = requests.Session()
+        s.headers.update({"User-Agent": "artgg/0.1 (wallpaper generator; educational use)"})
+        _thread_local.session = s
+    return _thread_local.session
+
+
+def _fetch_one(object_id: int):
+    """Fetch a single object from the Met API. Returns (object_id, url, error)."""
+    if _cancel.is_set():
+        return object_id, None, "cancelled"
+    try:
+        resp = _get_session().get(f"{MET_API_BASE}/{object_id}", timeout=15)
+        if resp.status_code == 200:
+            data = resp.json()
+            url = data.get("primaryImageSmall") or data.get("primaryImage") or ""
+            return object_id, url, None
+        if resp.status_code == 404:
+            return object_id, "", None
+        return object_id, None, f"HTTP {resp.status_code}"
+    except Exception as e:
+        return object_id, None, str(e)
+
+
+def cmd_fetch_images(workers: int, limit: int | None, department: str | None):
     if requests is None:
         print("ERROR: 'requests' package not installed. Run: pip install requests")
         sys.exit(1)
@@ -193,82 +225,68 @@ def cmd_fetch_images(delay: float, limit: int | None):
 
     conn = sqlite3.connect(DB_PATH)
 
-    # Count how many still need image URLs
-    total_pending = conn.execute(
-        "SELECT COUNT(*) FROM artworks WHERE image_url IS NULL"
-    ).fetchone()[0]
+    # Build query — department filter puts the chosen dept first, then everything else.
+    params: list = []
+    if department:
+        where = "WHERE image_url IS NULL AND department = ?"
+        params.append(department)
+    else:
+        where = "WHERE image_url IS NULL"
 
+    count_row = conn.execute(f"SELECT COUNT(*) FROM artworks {where}", params).fetchone()
+    total_pending = count_row[0]
     if limit:
         total_pending = min(total_pending, limit)
 
-    print(f"Fetching image URLs for {total_pending} artworks (delay={delay}s between requests)")
+    scope = f"department '{department}'" if department else "all departments"
+    print(f"Fetching image URLs for {total_pending} artworks ({scope}, {workers} workers)")
     print("Press Ctrl+C to stop — progress is saved continuously.\n")
 
-    query = "SELECT object_id FROM artworks WHERE image_url IS NULL ORDER BY object_id"
+    query = f"SELECT object_id FROM artworks {where} ORDER BY object_id"
     if limit:
         query += f" LIMIT {limit}"
+    rows = conn.execute(query, params).fetchall()
 
-    rows = conn.execute(query).fetchall()
-
-    session = requests.Session()
-    session.headers.update({"User-Agent": "artgg/0.1 (wallpaper generator; educational use)"})
-
-    fetched = 0
+    fetched  = 0
     no_image = 0
     errors   = 0
+    done     = 0
 
-    for (object_id,) in rows:
-        try:
-            resp = session.get(f"{MET_API_BASE}/{object_id}", timeout=15)
-            if resp.status_code == 200:
-                data = resp.json()
-                # Prefer the small version to save bandwidth; fall back to full
-                image_url = (
-                    data.get("primaryImageSmall")
-                    or data.get("primaryImage")
-                    or None
+    _cancel.clear()
+    try:
+        with ThreadPoolExecutor(max_workers=workers) as executor:
+            futures = {executor.submit(_fetch_one, oid): oid for (oid,) in rows}
+            for future in as_completed(futures):
+                object_id, url, error = future.result()
+                done += 1
+
+                if error == "cancelled":
+                    continue
+                if error:
+                    print(f"  WARNING {object_id}: {error}")
+                    errors += 1
+                    continue
+
+                # url is "" for 404/no-image, non-empty string for a real image
+                conn.execute(
+                    "UPDATE artworks SET image_url = ? WHERE object_id = ?",
+                    (url, object_id),
                 )
-                if image_url:
-                    conn.execute(
-                        "UPDATE artworks SET image_url = ? WHERE object_id = ?",
-                        (image_url, object_id)
-                    )
+                conn.commit()
+
+                if url:
                     fetched += 1
-                    print(f"  [{fetched}/{total_pending}] {object_id}: {image_url[:60]}...")
+                    print(f"  [{done}/{total_pending}] {object_id}: {url[:70]}...")
                 else:
-                    # No image available — mark as explicitly empty so we skip it next time
-                    conn.execute(
-                        "UPDATE artworks SET image_url = '' WHERE object_id = ?",
-                        (object_id,)
-                    )
                     no_image += 1
 
-                conn.commit()
-            elif resp.status_code == 404:
-                conn.execute(
-                    "UPDATE artworks SET image_url = '' WHERE object_id = ?",
-                    (object_id,)
-                )
-                conn.commit()
-                no_image += 1
-            else:
-                print(f"  WARNING: HTTP {resp.status_code} for object {object_id}")
-                errors += 1
+    except KeyboardInterrupt:
+        _cancel.set()
+        print(f"\nInterrupted. Progress saved ({fetched} fetched so far).")
 
-        except KeyboardInterrupt:
-            print(f"\nInterrupted. Progress saved ({fetched} fetched so far).")
-            break
-        except Exception as e:
-            print(f"  ERROR for object {object_id}: {e}")
-            errors += 1
-
-        time.sleep(delay)
-
-    # Show remaining count before closing
     still_pending = conn.execute(
         "SELECT COUNT(*) FROM artworks WHERE image_url IS NULL"
     ).fetchone()[0]
-
     conn.close()
 
     print(f"\nDone.")
@@ -298,12 +316,16 @@ def main():
         "fetch-images", help="Fetch real image URLs from the Met API"
     )
     fetch_parser.add_argument(
-        "--delay", type=float, default=0.5,
-        help="Seconds to wait between API requests (default: 0.5)"
+        "--workers", type=int, default=5,
+        help="Number of concurrent requests (default: 5)"
     )
     fetch_parser.add_argument(
         "--limit", type=int, default=None,
         help="Maximum number of artworks to process (default: all)"
+    )
+    fetch_parser.add_argument(
+        "--department", type=str, default=None,
+        help='Only fetch images for this department, e.g. "European Paintings"'
     )
 
     args = parser.parse_args()
@@ -311,7 +333,7 @@ def main():
     if args.command == "build" or args.command is None:
         cmd_build()
     elif args.command == "fetch-images":
-        cmd_fetch_images(delay=args.delay, limit=args.limit)
+        cmd_fetch_images(workers=args.workers, limit=args.limit, department=args.department)
     else:
         parser.print_help()
 
