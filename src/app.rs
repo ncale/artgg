@@ -37,10 +37,10 @@ pub enum TasteScreenMode {
     Browse,
     Detail,
     EditingDate(String),
-    SelectingKeywords,
+    SelectingDepartments,
     CreatingProfile,
     CreatingEditDate(String),
-    CreatingSelectKeywords,
+    CreatingSelectDepartments,
     CreatingName(String),
 }
 
@@ -75,7 +75,7 @@ pub struct TasteProfile {
     pub date_start: Option<i64>,
     pub date_end: Option<i64>,
     pub is_public_domain: bool,
-    pub keywords: Vec<String>,
+    pub departments: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -101,9 +101,9 @@ pub struct TasteProfileDraft {
     pub date_start: Option<i64>,
     pub date_end: Option<i64>,
     pub is_public_domain: bool,
-    pub keywords: Vec<String>,
+    pub departments: Vec<String>,
     pub name: String,
-    pub current_field: usize, // 0=date_start 1=date_end 2=pd 3=keywords 4=name
+    pub current_field: usize, // 0=date_start 1=date_end 2=pd 3=departments 4=name
 }
 
 impl Default for TasteProfileDraft {
@@ -112,7 +112,7 @@ impl Default for TasteProfileDraft {
             date_start: None,
             date_end: None,
             is_public_domain: true,
-            keywords: vec![],
+            departments: vec![],
             name: String::new(),
             current_field: 0,
         }
@@ -214,8 +214,8 @@ pub struct App {
     pub taste_selected: usize,
     pub taste_mode: TasteScreenMode,
     pub taste_detail_field: usize,
-    pub available_keywords: Vec<(i64, String)>,
-    pub keyword_cursor: usize,
+    pub available_departments: Vec<String>,
+    pub department_cursor: usize,
     pub new_taste_draft: TasteProfileDraft,
 
     // Display profiles
@@ -253,7 +253,11 @@ impl App {
         let conn = db::open()?;
         let taste_profiles    = db::load_taste_profiles(&conn)?;
         let display_profiles  = db::load_display_profiles(&conn)?;
-        let available_keywords = db::load_keywords(&conn)?;
+
+        // Load departments from collection DB (best-effort; empty if DB not yet built).
+        let collection_db = collection::find_collection_db()
+            .unwrap_or_else(|| "./assets/collection.db".to_string());
+        let available_departments = collection::load_departments(&collection_db).unwrap_or_default();
 
         Ok(Self {
             screen: Screen::Main,
@@ -264,8 +268,8 @@ impl App {
             taste_selected: 0,
             taste_mode: TasteScreenMode::Browse,
             taste_detail_field: 0,
-            available_keywords,
-            keyword_cursor: 0,
+            available_departments,
+            department_cursor: 0,
             new_taste_draft: TasteProfileDraft::default(),
 
             display_profiles,
@@ -456,7 +460,7 @@ impl App {
                         self.taste_mode = TasteScreenMode::EditingDate(val);
                     }
                     2 => self.toggle_public_domain(),
-                    3 => { self.taste_mode = TasteScreenMode::SelectingKeywords; self.keyword_cursor = 0; }
+                    3 => { self.taste_mode = TasteScreenMode::SelectingDepartments; self.department_cursor = 0; }
                     _ => {}
                 },
                 KeyCode::Char('e') => match self.taste_detail_field {
@@ -511,18 +515,18 @@ impl App {
                 _ => {}
             },
 
-            TasteScreenMode::SelectingKeywords => match key {
+            TasteScreenMode::SelectingDepartments => match key {
                 KeyCode::Up | KeyCode::Char('k') => {
-                    if self.keyword_cursor > 0 { self.keyword_cursor -= 1; }
+                    if self.department_cursor > 0 { self.department_cursor -= 1; }
                 }
                 KeyCode::Down | KeyCode::Char('j') => {
-                    if !self.available_keywords.is_empty()
-                        && self.keyword_cursor < self.available_keywords.len() - 1
+                    if !self.available_departments.is_empty()
+                        && self.department_cursor < self.available_departments.len() - 1
                     {
-                        self.keyword_cursor += 1;
+                        self.department_cursor += 1;
                     }
                 }
-                KeyCode::Char(' ') | KeyCode::Enter => { self.toggle_keyword(); }
+                KeyCode::Char(' ') | KeyCode::Enter => { self.toggle_department(); }
                 KeyCode::Esc => { self.taste_mode = TasteScreenMode::Detail; }
                 _ => {}
             },
@@ -548,7 +552,7 @@ impl App {
                         self.taste_mode = TasteScreenMode::CreatingEditDate(val);
                     }
                     2 => { self.new_taste_draft.is_public_domain = !self.new_taste_draft.is_public_domain; }
-                    3 => { self.keyword_cursor = 0; self.taste_mode = TasteScreenMode::CreatingSelectKeywords; }
+                    3 => { self.department_cursor = 0; self.taste_mode = TasteScreenMode::CreatingSelectDepartments; }
                     4 => {
                         let start = self.new_taste_draft.name.clone();
                         self.taste_mode = TasteScreenMode::CreatingName(start);
@@ -590,18 +594,18 @@ impl App {
                 _ => {}
             },
 
-            TasteScreenMode::CreatingSelectKeywords => match key {
+            TasteScreenMode::CreatingSelectDepartments => match key {
                 KeyCode::Up | KeyCode::Char('k') => {
-                    if self.keyword_cursor > 0 { self.keyword_cursor -= 1; }
+                    if self.department_cursor > 0 { self.department_cursor -= 1; }
                 }
                 KeyCode::Down | KeyCode::Char('j') => {
-                    if !self.available_keywords.is_empty()
-                        && self.keyword_cursor < self.available_keywords.len() - 1
+                    if !self.available_departments.is_empty()
+                        && self.department_cursor < self.available_departments.len() - 1
                     {
-                        self.keyword_cursor += 1;
+                        self.department_cursor += 1;
                     }
                 }
-                KeyCode::Char(' ') | KeyCode::Enter => { self.toggle_keyword_in_draft(); }
+                KeyCode::Char(' ') | KeyCode::Enter => { self.toggle_department_in_draft(); }
                 KeyCode::Esc => { self.taste_mode = TasteScreenMode::CreatingProfile; }
                 _ => {}
             },
@@ -611,20 +615,18 @@ impl App {
                 KeyCode::Backspace => { buf.pop(); self.taste_mode = TasteScreenMode::CreatingName(buf); }
                 KeyCode::Enter => {
                     if !buf.is_empty() {
-                        let date_start     = self.new_taste_draft.date_start;
-                        let date_end       = self.new_taste_draft.date_end;
+                        let date_start       = self.new_taste_draft.date_start;
+                        let date_end         = self.new_taste_draft.date_end;
                         let is_public_domain = self.new_taste_draft.is_public_domain;
-                        let keywords       = std::mem::take(&mut self.new_taste_draft.keywords);
+                        let departments      = std::mem::take(&mut self.new_taste_draft.departments);
                         let id = db::insert_taste_profile(
                             &self.conn, &buf, date_start, date_end, is_public_domain,
                         ).expect("db insert taste");
-                        for kw_val in &keywords {
-                            if let Some((kw_id, _)) = self.available_keywords.iter().find(|(_, v)| v == kw_val) {
-                                db::add_taste_profile_keyword(&self.conn, id, *kw_id).expect("db add kw");
-                            }
+                        for dept in &departments {
+                            db::add_taste_profile_department(&self.conn, id, dept).expect("db add dept");
                         }
                         self.taste_profiles.push(TasteProfile {
-                            id, name: buf, date_start, date_end, is_public_domain, keywords,
+                            id, name: buf, date_start, date_end, is_public_domain, departments,
                         });
                         self.taste_selected = self.taste_profiles.len() - 1;
                         self.taste_mode = TasteScreenMode::Browse;
@@ -650,28 +652,27 @@ impl App {
         db::update_taste_profile_fields(&self.conn, id, ds, de, pd).expect("db update");
     }
 
-    fn toggle_keyword(&mut self) {
-        if self.available_keywords.is_empty() { return; }
-        let (kw_id, kw_val) = self.available_keywords[self.keyword_cursor].clone();
+    fn toggle_department(&mut self) {
+        if self.available_departments.is_empty() { return; }
+        let dept = self.available_departments[self.department_cursor].clone();
         let idx = self.taste_selected;
-        if self.taste_profiles[idx].keywords.contains(&kw_val) {
-            self.taste_profiles[idx].keywords.retain(|k| k != &kw_val);
-            let pid = self.taste_profiles[idx].id;
-            db::remove_taste_profile_keyword(&self.conn, pid, kw_id).expect("db rm kw");
-        } else if self.taste_profiles[idx].keywords.len() < 10 {
-            self.taste_profiles[idx].keywords.push(kw_val);
-            let pid = self.taste_profiles[idx].id;
-            db::add_taste_profile_keyword(&self.conn, pid, kw_id).expect("db add kw");
+        let pid = self.taste_profiles[idx].id;
+        if self.taste_profiles[idx].departments.contains(&dept) {
+            self.taste_profiles[idx].departments.retain(|d| d != &dept);
+            db::remove_taste_profile_department(&self.conn, pid, &dept).expect("db rm dept");
+        } else {
+            self.taste_profiles[idx].departments.push(dept.clone());
+            db::add_taste_profile_department(&self.conn, pid, &dept).expect("db add dept");
         }
     }
 
-    fn toggle_keyword_in_draft(&mut self) {
-        if self.available_keywords.is_empty() { return; }
-        let (_, kw_val) = self.available_keywords[self.keyword_cursor].clone();
-        if self.new_taste_draft.keywords.contains(&kw_val) {
-            self.new_taste_draft.keywords.retain(|k| k != &kw_val);
-        } else if self.new_taste_draft.keywords.len() < 10 {
-            self.new_taste_draft.keywords.push(kw_val);
+    fn toggle_department_in_draft(&mut self) {
+        if self.available_departments.is_empty() { return; }
+        let dept = self.available_departments[self.department_cursor].clone();
+        if self.new_taste_draft.departments.contains(&dept) {
+            self.new_taste_draft.departments.retain(|d| d != &dept);
+        } else {
+            self.new_taste_draft.departments.push(dept);
         }
     }
 

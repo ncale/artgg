@@ -144,7 +144,7 @@ fn draw_taste_profiles(frame: &mut Frame, app: &App) {
                 );
             } else {
                 let p = &app.taste_profiles[app.taste_selected];
-                let items = build_taste_detail_items(p.date_start, p.date_end, p.is_public_domain, p.keywords.len(), None, "");
+                let items = build_taste_detail_items(p.date_start, p.date_end, p.is_public_domain, p.departments.len(), None, "");
                 let list = List::new(items).block(
                     Block::default().borders(Borders::ALL).border_type(BorderType::Rounded)
                         .border_style(Style::default().fg(Color::DarkGray)).title(format!(" {} ", p.name))
@@ -155,7 +155,7 @@ fn draw_taste_profiles(frame: &mut Frame, app: &App) {
 
         TasteScreenMode::Detail => {
             let p = &app.taste_profiles[app.taste_selected];
-            let items = build_taste_detail_items(p.date_start, p.date_end, p.is_public_domain, p.keywords.len(), None, "");
+            let items = build_taste_detail_items(p.date_start, p.date_end, p.is_public_domain, p.departments.len(), None, "");
             let mut state = ListState::default(); state.select(Some(app.taste_detail_field));
             let list = List::new(items)
                 .block(Block::default().borders(Borders::ALL).border_type(BorderType::Rounded)
@@ -167,7 +167,7 @@ fn draw_taste_profiles(frame: &mut Frame, app: &App) {
 
         TasteScreenMode::EditingDate(buf) => {
             let p = &app.taste_profiles[app.taste_selected];
-            let items = build_taste_detail_items(p.date_start, p.date_end, p.is_public_domain, p.keywords.len(), Some(app.taste_detail_field), buf);
+            let items = build_taste_detail_items(p.date_start, p.date_end, p.is_public_domain, p.departments.len(), Some(app.taste_detail_field), buf);
             let mut state = ListState::default(); state.select(Some(app.taste_detail_field));
             let list = List::new(items)
                 .block(Block::default().borders(Borders::ALL).border_type(BorderType::Rounded)
@@ -177,14 +177,14 @@ fn draw_taste_profiles(frame: &mut Frame, app: &App) {
             frame.render_stateful_widget(list, body[1], &mut state);
         }
 
-        TasteScreenMode::SelectingKeywords => {
+        TasteScreenMode::SelectingDepartments => {
             let p = &app.taste_profiles[app.taste_selected];
-            render_keyword_picker(frame, body[1], &app.available_keywords, &p.keywords, app.keyword_cursor);
+            render_department_picker(frame, body[1], &app.available_departments, &p.departments, app.department_cursor);
         }
 
         TasteScreenMode::CreatingProfile => {
             let d = &app.new_taste_draft;
-            let items = build_taste_creating_items(d.date_start, d.date_end, d.is_public_domain, d.keywords.len(), &d.name, None, "");
+            let items = build_taste_creating_items(d.date_start, d.date_end, d.is_public_domain, d.departments.len(), &d.name, None, "");
             let mut state = ListState::default(); state.select(Some(d.current_field));
             let list = List::new(items)
                 .block(Block::default().borders(Borders::ALL).border_type(BorderType::Rounded)
@@ -196,7 +196,7 @@ fn draw_taste_profiles(frame: &mut Frame, app: &App) {
 
         TasteScreenMode::CreatingEditDate(buf) => {
             let d = &app.new_taste_draft;
-            let items = build_taste_creating_items(d.date_start, d.date_end, d.is_public_domain, d.keywords.len(), &d.name, Some(d.current_field), buf);
+            let items = build_taste_creating_items(d.date_start, d.date_end, d.is_public_domain, d.departments.len(), &d.name, Some(d.current_field), buf);
             let mut state = ListState::default(); state.select(Some(d.current_field));
             let list = List::new(items)
                 .block(Block::default().borders(Borders::ALL).border_type(BorderType::Rounded)
@@ -206,13 +206,13 @@ fn draw_taste_profiles(frame: &mut Frame, app: &App) {
             frame.render_stateful_widget(list, body[1], &mut state);
         }
 
-        TasteScreenMode::CreatingSelectKeywords => {
-            render_keyword_picker(frame, body[1], &app.available_keywords, &app.new_taste_draft.keywords, app.keyword_cursor);
+        TasteScreenMode::CreatingSelectDepartments => {
+            render_department_picker(frame, body[1], &app.available_departments, &app.new_taste_draft.departments, app.department_cursor);
         }
 
         TasteScreenMode::CreatingName(buf) => {
             let d = &app.new_taste_draft;
-            let items = build_taste_creating_items(d.date_start, d.date_end, d.is_public_domain, d.keywords.len(), buf, Some(4), buf);
+            let items = build_taste_creating_items(d.date_start, d.date_end, d.is_public_domain, d.departments.len(), buf, Some(4), buf);
             let mut state = ListState::default(); state.select(Some(4));
             let list = List::new(items)
                 .block(Block::default().borders(Borders::ALL).border_type(BorderType::Rounded)
@@ -223,23 +223,23 @@ fn draw_taste_profiles(frame: &mut Frame, app: &App) {
         }
     }
 
-    let kw_count = match &app.taste_mode {
-        TasteScreenMode::SelectingKeywords => {
-            if !app.taste_profiles.is_empty() { app.taste_profiles[app.taste_selected].keywords.len() } else { 0 }
+    let dept_count = match &app.taste_mode {
+        TasteScreenMode::SelectingDepartments => {
+            if !app.taste_profiles.is_empty() { app.taste_profiles[app.taste_selected].departments.len() } else { 0 }
         }
-        TasteScreenMode::CreatingSelectKeywords => app.new_taste_draft.keywords.len(),
+        TasteScreenMode::CreatingSelectDepartments => app.new_taste_draft.departments.len(),
         _ => 0,
     };
-    let toggle_hint = format!("toggle ({}/10)", kw_count);
+    let toggle_hint = format!("toggle ({} selected)", dept_count);
     let footer_hints: Vec<(&str, &str)> = match &app.taste_mode {
         TasteScreenMode::Browse if app.taste_profiles.is_empty() => vec![("a", "add"), ("Esc", "back")],
         TasteScreenMode::Browse => vec![("↑↓", "select"), ("Enter", "edit"), ("a", "add"), ("d", "delete"), ("Esc", "back")],
         TasteScreenMode::Detail => vec![("↑↓", "navigate"), ("Enter", "edit"), ("Esc", "back")],
         TasteScreenMode::EditingDate(_) => vec![("Enter", "confirm"), ("Esc", "cancel")],
-        TasteScreenMode::SelectingKeywords => vec![("↑↓", "navigate"), ("Space", toggle_hint.as_str()), ("Esc", "done")],
+        TasteScreenMode::SelectingDepartments => vec![("↑↓", "navigate"), ("Space", toggle_hint.as_str()), ("Esc", "done")],
         TasteScreenMode::CreatingProfile => vec![("↑↓", "navigate"), ("Enter", "select"), ("Esc", "cancel")],
         TasteScreenMode::CreatingEditDate(_) => vec![("Enter", "confirm"), ("Esc", "cancel")],
-        TasteScreenMode::CreatingSelectKeywords => vec![("↑↓", "navigate"), ("Space", toggle_hint.as_str()), ("Esc", "done")],
+        TasteScreenMode::CreatingSelectDepartments => vec![("↑↓", "navigate"), ("Space", toggle_hint.as_str()), ("Esc", "done")],
         TasteScreenMode::CreatingName(_) => vec![("Enter", "confirm"), ("Esc", "cancel")],
     };
     render_footer(frame, footer_area, &footer_hints);
@@ -393,31 +393,32 @@ fn draw_display_profiles(frame: &mut Frame, app: &App) {
 
 fn build_taste_detail_items(
     date_start: Option<i64>, date_end: Option<i64>, is_public_domain: bool,
-    kw_count: usize, editing_field: Option<usize>, edit_buf: &str,
+    dept_count: usize, editing_field: Option<usize>, edit_buf: &str,
 ) -> Vec<ListItem<'static>> {
     let ds = if editing_field == Some(0) { format!("{}▌", edit_buf) } else { date_start.map(|v| v.to_string()).unwrap_or_else(|| "(not set)".to_string()) };
     let de = if editing_field == Some(1) { format!("{}▌", edit_buf) } else { date_end.map(|v| v.to_string()).unwrap_or_else(|| "(not set)".to_string()) };
+    let dept_str = if dept_count == 0 { "(any)".to_string() } else { format!("{} selected", dept_count) };
     vec![
         ListItem::new(format!(" {:<16}{}", "Date Start", ds)),
         ListItem::new(format!(" {:<16}{}", "Date End", de)),
         ListItem::new(format!(" {:<16}{}", "Public Domain", if is_public_domain { "Yes" } else { "No" })),
-        ListItem::new(format!(" {:<16}{}/10", "Keywords", kw_count)),
-        ListItem::new(format!(" {:<16}{}", "Artists", "(coming soon)")).style(Style::default().fg(Color::DarkGray)),
+        ListItem::new(format!(" {:<16}{}", "Departments", dept_str)),
     ]
 }
 
 fn build_taste_creating_items(
     date_start: Option<i64>, date_end: Option<i64>, is_public_domain: bool,
-    kw_count: usize, name: &str, editing_field: Option<usize>, edit_buf: &str,
+    dept_count: usize, name: &str, editing_field: Option<usize>, edit_buf: &str,
 ) -> Vec<ListItem<'static>> {
     let ds = if editing_field == Some(0) { format!("{}▌", edit_buf) } else { date_start.map(|v| v.to_string()).unwrap_or_else(|| "(not set)".to_string()) };
     let de = if editing_field == Some(1) { format!("{}▌", edit_buf) } else { date_end.map(|v| v.to_string()).unwrap_or_else(|| "(not set)".to_string()) };
     let nm = if editing_field == Some(4) { format!("{}▌", edit_buf) } else if name.is_empty() { "(enter name)".to_string() } else { name.to_string() };
+    let dept_str = if dept_count == 0 { "(any)".to_string() } else { format!("{} selected", dept_count) };
     vec![
         ListItem::new(format!(" {:<16}{}", "Date Start", ds)),
         ListItem::new(format!(" {:<16}{}", "Date End", de)),
         ListItem::new(format!(" {:<16}{}", "Public Domain", if is_public_domain { "Yes" } else { "No" })),
-        ListItem::new(format!(" {:<16}{}/10", "Keywords", kw_count)),
+        ListItem::new(format!(" {:<16}{}", "Departments", dept_str)),
         ListItem::new(format!(" {:<16}{}", "Name", nm)),
     ]
 }
@@ -472,21 +473,23 @@ fn build_display_creating_items(
     ]
 }
 
-fn render_keyword_picker(frame: &mut Frame, area: Rect, available: &[(i64, String)], selected: &[String], cursor: usize) {
+fn render_department_picker(frame: &mut Frame, area: Rect, available: &[String], selected: &[String], cursor: usize) {
     if available.is_empty() {
-        let msg = Paragraph::new("(no keywords in database yet)").alignment(Alignment::Center)
+        let msg = Paragraph::new("(collection.db not found — run build_db.py first)")
+            .alignment(Alignment::Center)
             .block(Block::default().borders(Borders::ALL).border_type(BorderType::Rounded)
-                .border_style(Style::default().fg(Color::Yellow)).title(" Select Keywords "));
+                .border_style(Style::default().fg(Color::Yellow)).title(" Select Departments "));
         frame.render_widget(msg, area);
     } else {
-        let items: Vec<ListItem> = available.iter().map(|(_, kw)| {
-            let prefix = if selected.contains(kw) { "[✓] " } else { "[ ] " };
-            ListItem::new(format!("{}{}", prefix, kw))
+        let items: Vec<ListItem> = available.iter().map(|dept| {
+            let prefix = if selected.contains(dept) { "[✓] " } else { "[ ] " };
+            ListItem::new(format!("{}{}", prefix, dept))
         }).collect();
         let mut state = ListState::default(); state.select(Some(cursor));
         let list = List::new(items)
             .block(Block::default().borders(Borders::ALL).border_type(BorderType::Rounded)
-                .border_style(Style::default().fg(Color::Yellow)).title(" Select Keywords "))
+                .border_style(Style::default().fg(Color::Yellow))
+                .title(" Select Departments (none = all) "))
             .highlight_style(Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD))
             .highlight_symbol("> ");
         frame.render_stateful_widget(list, area, &mut state);

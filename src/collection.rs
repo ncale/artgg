@@ -63,16 +63,29 @@ pub fn count_seeded(db_path: &str) -> Result<i64> {
     Ok(n)
 }
 
+/// Return all distinct department names from the collection DB, sorted.
+pub fn load_departments(db_path: &str) -> Result<Vec<String>> {
+    let conn = Connection::open(db_path)
+        .with_context(|| format!("Cannot open collection DB at '{}'", db_path))?;
+    let mut stmt = conn.prepare(
+        "SELECT DISTINCT department FROM artworks
+         WHERE department IS NOT NULL AND department != ''
+         ORDER BY department",
+    )?;
+    let depts = stmt
+        .query_map([], |row| row.get(0))?
+        .collect::<rusqlite::Result<Vec<String>>>()?;
+    Ok(depts)
+}
+
 pub fn query_artworks(db_path: &str, taste: &TasteProfile, count: usize) -> Result<Vec<Artwork>> {
     let conn = Connection::open(db_path)
         .with_context(|| format!("Cannot open collection DB at '{}'", db_path))?;
 
-    // Try to run with year_approx; gracefully fall back if column is missing.
+    // Try with year_approx; fall back gracefully if old schema.
     match query_inner(&conn, taste, count) {
         Ok(rows) => Ok(rows),
         Err(e) => {
-            // If the error mentions year_approx, the DB was built with old schema.
-            // Retry without date filtering.
             let msg = e.to_string();
             if msg.contains("year_approx") || msg.contains("no such column") {
                 query_no_year(&conn, taste, count)
@@ -85,95 +98,84 @@ pub fn query_artworks(db_path: &str, taste: &TasteProfile, count: usize) -> Resu
 }
 
 fn query_inner(conn: &Connection, taste: &TasteProfile, count: usize) -> Result<Vec<Artwork>> {
-    let date_start = taste.date_start;
-    let date_end   = taste.date_end;
+    use rusqlite::types::Value;
 
-    let artworks = if taste.keywords.is_empty() {
-        // Plain query with optional date range
-        let mut stmt = conn.prepare(
-            "SELECT object_id, title, artist_display, date_display, medium, image_url
-             FROM artworks
-             WHERE is_public_domain = 1
-               AND image_url LIKE 'https://images.metmuseum.org%'
-               AND (?1 IS NULL OR year_approx IS NULL OR year_approx >= ?1)
-               AND (?2 IS NULL OR year_approx IS NULL OR year_approx <= ?2)
-             ORDER BY RANDOM()
-             LIMIT ?3",
-        )?;
-        let rows = stmt.query_map(
-            rusqlite::params![date_start, date_end, count as i64],
-            row_to_artwork,
-        )?.collect::<rusqlite::Result<Vec<_>>>()?;
-        rows
+    let ds = taste.date_start.map(Value::Integer).unwrap_or(Value::Null);
+    let de = taste.date_end.map(Value::Integer).unwrap_or(Value::Null);
+
+    // Build optional department IN clause.
+    let dept_clause = if taste.departments.is_empty() {
+        String::new()
     } else {
-        // FTS query: match any of the keywords
-        let fts_query = taste
-            .keywords
-            .iter()
-            .map(|k| format!("\"{}\"", k.replace('"', "")))
+        let ph = std::iter::repeat("?")
+            .take(taste.departments.len())
             .collect::<Vec<_>>()
-            .join(" OR ");
-
-        let mut stmt = conn.prepare(
-            "SELECT a.object_id, a.title, a.artist_display, a.date_display, a.medium, a.image_url
-             FROM artworks a
-             JOIN artworks_fts ON artworks_fts.rowid = a.object_id
-             WHERE artworks_fts MATCH ?1
-               AND a.is_public_domain = 1
-               AND a.image_url LIKE 'https://images.metmuseum.org%'
-               AND (?2 IS NULL OR a.year_approx IS NULL OR a.year_approx >= ?2)
-               AND (?3 IS NULL OR a.year_approx IS NULL OR a.year_approx <= ?3)
-             ORDER BY RANDOM()
-             LIMIT ?4",
-        )?;
-        let rows = stmt.query_map(
-            rusqlite::params![fts_query, date_start, date_end, count as i64],
-            row_to_artwork,
-        )?.collect::<rusqlite::Result<Vec<_>>>()?;
-        rows
+            .join(",");
+        format!("AND department IN ({}) ", ph)
     };
 
-    Ok(artworks)
+    let sql = format!(
+        "SELECT object_id, title, artist_display, date_display, medium, image_url
+         FROM artworks
+         WHERE is_public_domain = 1
+           AND image_url LIKE 'https://images.metmuseum.org%'
+           AND (? IS NULL OR year_approx IS NULL OR year_approx >= ?)
+           AND (? IS NULL OR year_approx IS NULL OR year_approx <= ?)
+           {}ORDER BY RANDOM()
+         LIMIT ?",
+        dept_clause
+    );
+
+    let mut stmt = conn.prepare(&sql)?;
+
+    // date_start appears twice (IS NULL check + comparison), same for date_end.
+    let mut params: Vec<Value> = vec![ds.clone(), ds, de.clone(), de];
+    for dept in &taste.departments {
+        params.push(Value::Text(dept.clone()));
+    }
+    params.push(Value::Integer(count as i64));
+
+    let rows = stmt
+        .query_map(rusqlite::params_from_iter(params), row_to_artwork)?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(rows)
 }
 
 /// Fallback query that skips year_approx (old DB schema).
 fn query_no_year(conn: &Connection, taste: &TasteProfile, count: usize) -> Result<Vec<Artwork>> {
-    let artworks = if taste.keywords.is_empty() {
-        let mut stmt = conn.prepare(
-            "SELECT object_id, title, artist_display, date_display, medium, image_url
-             FROM artworks
-             WHERE is_public_domain = 1
-               AND image_url LIKE 'https://images.metmuseum.org%'
-             ORDER BY RANDOM()
-             LIMIT ?1",
-        )?;
-        let rows = stmt.query_map(rusqlite::params![count as i64], row_to_artwork)?
-            .collect::<rusqlite::Result<Vec<_>>>()?;
-        rows
-    } else {
-        let fts_query = taste
-            .keywords
-            .iter()
-            .map(|k| format!("\"{}\"", k.replace('"', "")))
-            .collect::<Vec<_>>()
-            .join(" OR ");
+    use rusqlite::types::Value;
 
-        let mut stmt = conn.prepare(
-            "SELECT a.object_id, a.title, a.artist_display, a.date_display, a.medium, a.image_url
-             FROM artworks a
-             JOIN artworks_fts ON artworks_fts.rowid = a.object_id
-             WHERE artworks_fts MATCH ?1
-               AND a.is_public_domain = 1
-               AND a.image_url IS NOT NULL AND a.image_url != ''
-             ORDER BY RANDOM()
-             LIMIT ?2",
-        )?;
-        let rows = stmt.query_map(rusqlite::params![fts_query, count as i64], row_to_artwork)?
-            .collect::<rusqlite::Result<Vec<_>>>()?;
-        rows
+    let dept_clause = if taste.departments.is_empty() {
+        String::new()
+    } else {
+        let ph = std::iter::repeat("?")
+            .take(taste.departments.len())
+            .collect::<Vec<_>>()
+            .join(",");
+        format!("AND department IN ({}) ", ph)
     };
 
-    Ok(artworks)
+    let sql = format!(
+        "SELECT object_id, title, artist_display, date_display, medium, image_url
+         FROM artworks
+         WHERE is_public_domain = 1
+           AND image_url LIKE 'https://images.metmuseum.org%'
+           {}ORDER BY RANDOM()
+         LIMIT ?",
+        dept_clause
+    );
+
+    let mut stmt = conn.prepare(&sql)?;
+
+    let mut params: Vec<Value> = taste.departments.iter()
+        .map(|d| Value::Text(d.clone()))
+        .collect();
+    params.push(Value::Integer(count as i64));
+
+    let rows = stmt
+        .query_map(rusqlite::params_from_iter(params), row_to_artwork)?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(rows)
 }
 
 fn row_to_artwork(row: &rusqlite::Row<'_>) -> rusqlite::Result<Artwork> {

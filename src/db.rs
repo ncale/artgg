@@ -33,14 +33,10 @@ pub fn open() -> Result<Connection> {
             id   INTEGER PRIMARY KEY AUTOINCREMENT,
             name TEXT NOT NULL
          );
-         CREATE TABLE IF NOT EXISTS keywords (
-            id    INTEGER PRIMARY KEY AUTOINCREMENT,
-            value TEXT NOT NULL UNIQUE
-         );
-         CREATE TABLE IF NOT EXISTS taste_profile_keywords (
+         CREATE TABLE IF NOT EXISTS taste_profile_departments (
             profile_id INTEGER NOT NULL REFERENCES taste_profiles(id) ON DELETE CASCADE,
-            keyword_id INTEGER NOT NULL REFERENCES keywords(id) ON DELETE CASCADE,
-            PRIMARY KEY (profile_id, keyword_id)
+            department TEXT NOT NULL,
+            PRIMARY KEY (profile_id, department)
          );
          CREATE TABLE IF NOT EXISTS builds (
             id                 INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -102,17 +98,16 @@ pub fn open() -> Result<Connection> {
 // Taste profiles
 // ---------------------------------------------------------------------------
 
-fn load_taste_profile_keywords(conn: &Connection, profile_id: i64) -> Result<Vec<String>> {
+fn load_taste_profile_departments(conn: &Connection, profile_id: i64) -> Result<Vec<String>> {
     let mut stmt = conn.prepare(
-        "SELECT k.value FROM keywords k
-         JOIN taste_profile_keywords tpk ON k.id = tpk.keyword_id
-         WHERE tpk.profile_id = ?1
-         ORDER BY k.value",
+        "SELECT department FROM taste_profile_departments
+         WHERE profile_id = ?1
+         ORDER BY department",
     )?;
-    let keywords = stmt
+    let depts = stmt
         .query_map([profile_id], |row| row.get(0))?
         .collect::<rusqlite::Result<Vec<_>>>()?;
-    Ok(keywords)
+    Ok(depts)
 }
 
 pub fn load_taste_profiles(conn: &Connection) -> Result<Vec<TasteProfile>> {
@@ -125,11 +120,11 @@ pub fn load_taste_profiles(conn: &Connection) -> Result<Vec<TasteProfile>> {
 
     let mut profiles = Vec::new();
     for (id, name, date_start, date_end, pd_int) in rows {
-        let keywords = load_taste_profile_keywords(conn, id)?;
+        let departments = load_taste_profile_departments(conn, id)?;
         profiles.push(TasteProfile {
             id, name, date_start, date_end,
             is_public_domain: pd_int != 0,
-            keywords,
+            departments,
         });
     }
     Ok(profiles)
@@ -168,32 +163,20 @@ pub fn update_taste_profile_fields(
     Ok(())
 }
 
-pub fn add_taste_profile_keyword(conn: &Connection, profile_id: i64, keyword_id: i64) -> Result<()> {
+pub fn add_taste_profile_department(conn: &Connection, profile_id: i64, department: &str) -> Result<()> {
     conn.execute(
-        "INSERT OR IGNORE INTO taste_profile_keywords (profile_id, keyword_id) VALUES (?1, ?2)",
-        rusqlite::params![profile_id, keyword_id],
+        "INSERT OR IGNORE INTO taste_profile_departments (profile_id, department) VALUES (?1, ?2)",
+        rusqlite::params![profile_id, department],
     )?;
     Ok(())
 }
 
-pub fn remove_taste_profile_keyword(conn: &Connection, profile_id: i64, keyword_id: i64) -> Result<()> {
+pub fn remove_taste_profile_department(conn: &Connection, profile_id: i64, department: &str) -> Result<()> {
     conn.execute(
-        "DELETE FROM taste_profile_keywords WHERE profile_id = ?1 AND keyword_id = ?2",
-        rusqlite::params![profile_id, keyword_id],
+        "DELETE FROM taste_profile_departments WHERE profile_id = ?1 AND department = ?2",
+        rusqlite::params![profile_id, department],
     )?;
     Ok(())
-}
-
-// ---------------------------------------------------------------------------
-// Keywords
-// ---------------------------------------------------------------------------
-
-pub fn load_keywords(conn: &Connection) -> Result<Vec<(i64, String)>> {
-    let mut stmt = conn.prepare("SELECT id, value FROM keywords ORDER BY value")?;
-    let keywords = stmt
-        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
-    Ok(keywords)
 }
 
 // ---------------------------------------------------------------------------
