@@ -82,6 +82,18 @@ pub fn open() -> Result<Connection> {
         "ALTER TABLE display_profiles ADD COLUMN canvas_height INTEGER NOT NULL DEFAULT 1080",
         [],
     );
+    let _ = conn.execute(
+        "ALTER TABLE display_profiles ADD COLUMN placard_color TEXT NOT NULL DEFAULT '#F5F1E8'",
+        [],
+    );
+    let _ = conn.execute(
+        "ALTER TABLE display_profiles ADD COLUMN placard_text_color TEXT NOT NULL DEFAULT '#1E160C'",
+        [],
+    );
+    let _ = conn.execute(
+        "ALTER TABLE display_profiles ADD COLUMN placard_opacity INTEGER NOT NULL DEFAULT 90",
+        [],
+    );
 
     Ok(conn)
 }
@@ -190,19 +202,23 @@ pub fn load_keywords(conn: &Connection) -> Result<Vec<(i64, String)>> {
 
 pub fn load_display_profiles(conn: &Connection) -> Result<Vec<DisplayProfile>> {
     let mut stmt = conn.prepare(
-        "SELECT id, name, wallpaper_color, frame_style, orientation, canvas_width, canvas_height
+        "SELECT id, name, wallpaper_color, frame_style, orientation, canvas_width, canvas_height,
+                placard_color, placard_text_color, placard_opacity
          FROM display_profiles ORDER BY id",
     )?;
     let profiles = stmt
         .query_map([], |row| {
             Ok(DisplayProfile {
-                id:             row.get(0)?,
-                name:           row.get(1)?,
-                wallpaper_color: row.get(2)?,
-                frame_style:    row.get(3)?,
-                orientation:    row.get(4)?,
-                canvas_width:   row.get::<_, i64>(5)? as u32,
-                canvas_height:  row.get::<_, i64>(6)? as u32,
+                id:                  row.get(0)?,
+                name:                row.get(1)?,
+                wallpaper_color:     row.get(2)?,
+                frame_style:         row.get(3)?,
+                orientation:         row.get(4)?,
+                canvas_width:        row.get::<_, i64>(5)? as u32,
+                canvas_height:       row.get::<_, i64>(6)? as u32,
+                placard_color:       row.get(7)?,
+                placard_text_color:  row.get(8)?,
+                placard_opacity:     row.get::<_, i64>(9)? as u32,
             })
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -217,11 +233,20 @@ pub fn insert_display_profile(
     orientation: &str,
     canvas_width: u32,
     canvas_height: u32,
+    placard_color: &str,
+    placard_text_color: &str,
+    placard_opacity: u32,
 ) -> Result<i64> {
     conn.execute(
-        "INSERT INTO display_profiles (name, wallpaper_color, frame_style, orientation, canvas_width, canvas_height)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-        rusqlite::params![name, wallpaper_color, frame_style, orientation, canvas_width as i64, canvas_height as i64],
+        "INSERT INTO display_profiles (name, wallpaper_color, frame_style, orientation,
+                                       canvas_width, canvas_height,
+                                       placard_color, placard_text_color, placard_opacity)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+        rusqlite::params![
+            name, wallpaper_color, frame_style, orientation,
+            canvas_width as i64, canvas_height as i64,
+            placard_color, placard_text_color, placard_opacity as i64,
+        ],
     )?;
     Ok(conn.last_insert_rowid())
 }
@@ -239,14 +264,22 @@ pub fn update_display_profile_fields(
     orientation: &str,
     canvas_width: u32,
     canvas_height: u32,
+    placard_color: &str,
+    placard_text_color: &str,
+    placard_opacity: u32,
 ) -> Result<()> {
     conn.execute(
         "UPDATE display_profiles
          SET wallpaper_color = ?1, frame_style = ?2, orientation = ?3,
-             canvas_width = ?4, canvas_height = ?5
-         WHERE id = ?6",
-        rusqlite::params![wallpaper_color, frame_style, orientation,
-                          canvas_width as i64, canvas_height as i64, id],
+             canvas_width = ?4, canvas_height = ?5,
+             placard_color = ?6, placard_text_color = ?7, placard_opacity = ?8
+         WHERE id = ?9",
+        rusqlite::params![
+            wallpaper_color, frame_style, orientation,
+            canvas_width as i64, canvas_height as i64,
+            placard_color, placard_text_color, placard_opacity as i64,
+            id,
+        ],
     )?;
     Ok(())
 }

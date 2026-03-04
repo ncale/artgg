@@ -123,6 +123,9 @@ pub fn render_wallpaper(
     canvas_w: u32,
     canvas_h: u32,
     bg_color: Rgb<u8>,
+    placard_color: Rgb<u8>,
+    placard_text_color: Rgb<u8>,
+    placard_opacity: f32, // 0.0 – 1.0
     font: Option<&fontdue::Font>,
 ) -> Result<RgbImage> {
     // 1. Create canvas.
@@ -160,30 +163,26 @@ pub fn render_wallpaper(
     // Clamp placard to canvas
     let placard_y_end = (placard_y + placard_h).min(canvas_h);
 
-    // Museum card color: antique warm off-white
-    let card_bg = Rgb([245u8, 241u8, 232u8]);
+    // Draw placard background with opacity blending against whatever is already on canvas.
     for py in placard_y..placard_y_end {
-        for px in placard_x..placard_x + placard_w {
-            if px < canvas_w {
-                canvas.put_pixel(px, py, card_bg);
-            }
+        for px in placard_x..(placard_x + placard_w).min(canvas_w) {
+            let behind = *canvas.get_pixel(px, py);
+            canvas.put_pixel(px, py, blend(behind, placard_color, placard_opacity));
         }
     }
 
-    // Accent line at top of placard (dark)
+    // Accent bar at the top of the placard — uses text color for auto-contrast.
     let accent_h = 3u32;
-    let accent_color = Rgb([60u8, 45u8, 30u8]);
-    for py in placard_y..placard_y + accent_h {
-        for px in placard_x..placard_x + placard_w {
-            if px < canvas_w && py < canvas_h {
-                canvas.put_pixel(px, py, accent_color);
-            }
+    for py in placard_y..(placard_y + accent_h).min(canvas_h) {
+        for px in placard_x..(placard_x + placard_w).min(canvas_w) {
+            // Accent is always fully opaque.
+            canvas.put_pixel(px, py, placard_text_color);
         }
     }
 
     // 7. Draw text onto placard (if font available).
     if let Some(font) = font {
-        let text_color = [30u8, 22u8, 12u8]; // dark brown-black
+        let text_color = [placard_text_color[0], placard_text_color[1], placard_text_color[2]];
         let margin_x = (placard_w as f32 * 0.05) as u32;
         let text_left = placard_x + margin_x;
 
@@ -225,6 +224,16 @@ pub fn render_wallpaper(
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+/// Alpha-blend `fg` over `bg` with the given opacity (0.0 = fully transparent, 1.0 = opaque).
+fn blend(bg: Rgb<u8>, fg: Rgb<u8>, opacity: f32) -> Rgb<u8> {
+    let a = opacity.clamp(0.0, 1.0);
+    Rgb([
+        (fg[0] as f32 * a + bg[0] as f32 * (1.0 - a)) as u8,
+        (fg[1] as f32 * a + bg[1] as f32 * (1.0 - a)) as u8,
+        (fg[2] as f32 * a + bg[2] as f32 * (1.0 - a)) as u8,
+    ])
+}
 
 fn truncate(s: &str, max: usize) -> String {
     let chars: Vec<char> = s.chars().collect();

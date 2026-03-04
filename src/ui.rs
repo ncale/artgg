@@ -283,7 +283,9 @@ fn draw_display_profiles(frame: &mut Frame, app: &App) {
                 );
             } else {
                 let p = &app.display_profiles[app.display_selected];
-                let items = build_display_detail_items(&p.wallpaper_color, &p.orientation, p.canvas_width, p.canvas_height, None, "");
+                let items = build_display_detail_items(
+                    &p.wallpaper_color, &p.orientation, p.canvas_width, p.canvas_height,
+                    &p.placard_color, &p.placard_text_color, p.placard_opacity, None, "");
                 let list = List::new(items).block(
                     Block::default().borders(Borders::ALL).border_type(BorderType::Rounded)
                         .border_style(Style::default().fg(Color::DarkGray)).title(format!(" {} ", p.name))
@@ -294,7 +296,9 @@ fn draw_display_profiles(frame: &mut Frame, app: &App) {
 
         DisplayScreenMode::Detail => {
             let p = &app.display_profiles[app.display_selected];
-            let items = build_display_detail_items(&p.wallpaper_color, &p.orientation, p.canvas_width, p.canvas_height, None, "");
+            let items = build_display_detail_items(
+                &p.wallpaper_color, &p.orientation, p.canvas_width, p.canvas_height,
+                &p.placard_color, &p.placard_text_color, p.placard_opacity, None, "");
             let mut state = ListState::default(); state.select(Some(app.display_detail_field));
             let list = List::new(items)
                 .block(Block::default().borders(Borders::ALL).border_type(BorderType::Rounded)
@@ -306,7 +310,10 @@ fn draw_display_profiles(frame: &mut Frame, app: &App) {
 
         DisplayScreenMode::EditingText(buf) => {
             let p = &app.display_profiles[app.display_selected];
-            let items = build_display_detail_items(&p.wallpaper_color, &p.orientation, p.canvas_width, p.canvas_height, Some(app.display_detail_field), buf);
+            let items = build_display_detail_items(
+                &p.wallpaper_color, &p.orientation, p.canvas_width, p.canvas_height,
+                &p.placard_color, &p.placard_text_color, p.placard_opacity,
+                Some(app.display_detail_field), buf);
             let mut state = ListState::default(); state.select(Some(app.display_detail_field));
             let list = List::new(items)
                 .block(Block::default().borders(Borders::ALL).border_type(BorderType::Rounded)
@@ -320,7 +327,10 @@ fn draw_display_profiles(frame: &mut Frame, app: &App) {
             let d = &app.new_display_draft;
             let w = d.canvas_width.parse::<u32>().unwrap_or(1920);
             let h = d.canvas_height.parse::<u32>().unwrap_or(1080);
-            let items = build_display_creating_items(&d.wallpaper_color, &d.orientation, w, h, &d.name, None, "");
+            let op = d.placard_opacity.parse::<u32>().unwrap_or(90);
+            let items = build_display_creating_items(
+                &d.wallpaper_color, &d.orientation, w, h,
+                &d.placard_color, &d.placard_text_color, op, &d.name, None, "");
             let mut state = ListState::default(); state.select(Some(d.current_field));
             let list = List::new(items)
                 .block(Block::default().borders(Borders::ALL).border_type(BorderType::Rounded)
@@ -334,7 +344,10 @@ fn draw_display_profiles(frame: &mut Frame, app: &App) {
             let d = &app.new_display_draft;
             let w = d.canvas_width.parse::<u32>().unwrap_or(1920);
             let h = d.canvas_height.parse::<u32>().unwrap_or(1080);
-            let items = build_display_creating_items(&d.wallpaper_color, &d.orientation, w, h, &d.name, Some(d.current_field), buf);
+            let op = d.placard_opacity.parse::<u32>().unwrap_or(90);
+            let items = build_display_creating_items(
+                &d.wallpaper_color, &d.orientation, w, h,
+                &d.placard_color, &d.placard_text_color, op, &d.name, Some(d.current_field), buf);
             let mut state = ListState::default(); state.select(Some(d.current_field));
             let list = List::new(items)
                 .block(Block::default().borders(Borders::ALL).border_type(BorderType::Rounded)
@@ -348,8 +361,11 @@ fn draw_display_profiles(frame: &mut Frame, app: &App) {
             let d = &app.new_display_draft;
             let w = d.canvas_width.parse::<u32>().unwrap_or(1920);
             let h = d.canvas_height.parse::<u32>().unwrap_or(1080);
-            let items = build_display_creating_items(&d.wallpaper_color, &d.orientation, w, h, buf, Some(5), buf);
-            let mut state = ListState::default(); state.select(Some(5));
+            let op = d.placard_opacity.parse::<u32>().unwrap_or(90);
+            let items = build_display_creating_items(
+                &d.wallpaper_color, &d.orientation, w, h,
+                &d.placard_color, &d.placard_text_color, op, buf, Some(8), buf);
+            let mut state = ListState::default(); state.select(Some(8));
             let list = List::new(items)
                 .block(Block::default().borders(Borders::ALL).border_type(BorderType::Rounded)
                     .border_style(Style::default().fg(Color::Yellow)).title(" New Display Profile "))
@@ -408,37 +424,51 @@ fn build_taste_creating_items(
 
 fn build_display_detail_items(
     wallpaper_color: &str, orientation: &str, canvas_width: u32, canvas_height: u32,
+    placard_color: &str, placard_text_color: &str, placard_opacity: u32,
     editing_field: Option<usize>, edit_buf: &str,
 ) -> Vec<ListItem<'static>> {
-    let color  = if editing_field == Some(0) { format!("{}▌", edit_buf) } else { wallpaper_color.to_string() };
-    let orient = if orientation == "horizontal" { "Horizontal" } else { "Vertical" }.to_string();
-    let w_str  = if editing_field == Some(3) { format!("{}▌", edit_buf) } else { canvas_width.to_string() };
-    let h_str  = if editing_field == Some(4) { format!("{}▌", edit_buf) } else { canvas_height.to_string() };
+    let color   = if editing_field == Some(0) { format!("{}▌", edit_buf) } else { wallpaper_color.to_string() };
+    let orient  = if orientation == "horizontal" { "Horizontal" } else { "Vertical" }.to_string();
+    let w_str   = if editing_field == Some(3) { format!("{}▌", edit_buf) } else { canvas_width.to_string() };
+    let h_str   = if editing_field == Some(4) { format!("{}▌", edit_buf) } else { canvas_height.to_string() };
+    let pc      = if editing_field == Some(5) { format!("{}▌", edit_buf) } else { placard_color.to_string() };
+    let ptc     = if editing_field == Some(6) { format!("{}▌", edit_buf) } else { placard_text_color.to_string() };
+    let opacity = if editing_field == Some(7) { format!("{}▌", edit_buf) } else { format!("{}%", placard_opacity) };
     vec![
-        ListItem::new(format!(" {:<16}{}", "Color", color)),
-        ListItem::new(format!(" {:<16}{}", "Frame Style", "(coming soon)")).style(Style::default().fg(Color::DarkGray)),
-        ListItem::new(format!(" {:<16}{}", "Orientation", orient)),
-        ListItem::new(format!(" {:<16}{}", "Width (px)", w_str)),
-        ListItem::new(format!(" {:<16}{}", "Height (px)", h_str)),
+        ListItem::new(format!(" {:<20}{}", "BG Color", color)),
+        ListItem::new(format!(" {:<20}{}", "Frame Style", "(coming soon)")).style(Style::default().fg(Color::DarkGray)),
+        ListItem::new(format!(" {:<20}{}", "Orientation", orient)),
+        ListItem::new(format!(" {:<20}{}", "Width (px)", w_str)),
+        ListItem::new(format!(" {:<20}{}", "Height (px)", h_str)),
+        ListItem::new(format!(" {:<20}{}", "Placard BG", pc)),
+        ListItem::new(format!(" {:<20}{}", "Placard Text", ptc)),
+        ListItem::new(format!(" {:<20}{}", "Placard Opacity", opacity)),
     ]
 }
 
 fn build_display_creating_items(
     wallpaper_color: &str, orientation: &str, canvas_width: u32, canvas_height: u32,
+    placard_color: &str, placard_text_color: &str, placard_opacity: u32,
     name: &str, editing_field: Option<usize>, edit_buf: &str,
 ) -> Vec<ListItem<'static>> {
-    let color  = if editing_field == Some(0) { format!("{}▌", edit_buf) } else { wallpaper_color.to_string() };
-    let orient = if orientation == "horizontal" { "Horizontal" } else { "Vertical" }.to_string();
-    let w_str  = if editing_field == Some(3) { format!("{}▌", edit_buf) } else { canvas_width.to_string() };
-    let h_str  = if editing_field == Some(4) { format!("{}▌", edit_buf) } else { canvas_height.to_string() };
-    let nm     = if editing_field == Some(5) { format!("{}▌", edit_buf) } else if name.is_empty() { "(enter name)".to_string() } else { name.to_string() };
+    let color   = if editing_field == Some(0) { format!("{}▌", edit_buf) } else { wallpaper_color.to_string() };
+    let orient  = if orientation == "horizontal" { "Horizontal" } else { "Vertical" }.to_string();
+    let w_str   = if editing_field == Some(3) { format!("{}▌", edit_buf) } else { canvas_width.to_string() };
+    let h_str   = if editing_field == Some(4) { format!("{}▌", edit_buf) } else { canvas_height.to_string() };
+    let pc      = if editing_field == Some(5) { format!("{}▌", edit_buf) } else { placard_color.to_string() };
+    let ptc     = if editing_field == Some(6) { format!("{}▌", edit_buf) } else { placard_text_color.to_string() };
+    let opacity = if editing_field == Some(7) { format!("{}▌", edit_buf) } else { format!("{}%", placard_opacity) };
+    let nm      = if editing_field == Some(8) { format!("{}▌", edit_buf) } else if name.is_empty() { "(enter name)".to_string() } else { name.to_string() };
     vec![
-        ListItem::new(format!(" {:<16}{}", "Color", color)),
-        ListItem::new(format!(" {:<16}{}", "Frame Style", "(coming soon)")).style(Style::default().fg(Color::DarkGray)),
-        ListItem::new(format!(" {:<16}{}", "Orientation", orient)),
-        ListItem::new(format!(" {:<16}{}", "Width (px)", w_str)),
-        ListItem::new(format!(" {:<16}{}", "Height (px)", h_str)),
-        ListItem::new(format!(" {:<16}{}", "Name", nm)),
+        ListItem::new(format!(" {:<20}{}", "BG Color", color)),
+        ListItem::new(format!(" {:<20}{}", "Frame Style", "(coming soon)")).style(Style::default().fg(Color::DarkGray)),
+        ListItem::new(format!(" {:<20}{}", "Orientation", orient)),
+        ListItem::new(format!(" {:<20}{}", "Width (px)", w_str)),
+        ListItem::new(format!(" {:<20}{}", "Height (px)", h_str)),
+        ListItem::new(format!(" {:<20}{}", "Placard BG", pc)),
+        ListItem::new(format!(" {:<20}{}", "Placard Text", ptc)),
+        ListItem::new(format!(" {:<20}{}", "Placard Opacity", opacity)),
+        ListItem::new(format!(" {:<20}{}", "Name", nm)),
     ]
 }
 

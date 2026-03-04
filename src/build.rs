@@ -95,9 +95,12 @@ pub fn run(params: BuildParams, tx: Sender<BuildMessage>) {
     }
 
     // ── 4. Canvas size & background ────────────────────────────────────────
-    let canvas_w = params.display.canvas_width;
-    let canvas_h = params.display.canvas_height;
-    let bg_color = renderer::parse_hex_color(&params.display.wallpaper_color);
+    let canvas_w        = params.display.canvas_width;
+    let canvas_h        = params.display.canvas_height;
+    let bg_color        = renderer::parse_hex_color(&params.display.wallpaper_color);
+    let placard_color   = renderer::parse_hex_color(&params.display.placard_color);
+    let placard_text    = renderer::parse_hex_color(&params.display.placard_text_color);
+    let placard_opacity = params.display.placard_opacity.min(100) as f32 / 100.0;
 
     // ── 5. HTTP client ─────────────────────────────────────────────────────
     let client = match reqwest::blocking::Client::builder()
@@ -187,6 +190,9 @@ pub fn run(params: BuildParams, tx: Sender<BuildMessage>) {
             canvas_w,
             canvas_h,
             bg_color,
+            placard_color,
+            placard_text,
+            placard_opacity,
             font.as_ref(),
         ) {
             Ok(img) => match img.save(&output_path) {

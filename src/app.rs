@@ -87,6 +87,9 @@ pub struct DisplayProfile {
     pub orientation: String,
     pub canvas_width: u32,
     pub canvas_height: u32,
+    pub placard_color: String,      // hex background of the placard card
+    pub placard_text_color: String, // hex color for all placard text
+    pub placard_opacity: u32,       // 0–100
 }
 
 // ---------------------------------------------------------------------------
@@ -123,8 +126,12 @@ pub struct DisplayProfileDraft {
     pub orientation: String,
     pub canvas_width: String,
     pub canvas_height: String,
+    pub placard_color: String,
+    pub placard_text_color: String,
+    pub placard_opacity: String,
     pub name: String,
-    pub current_field: usize, // 0=color 1=frame 2=orientation 3=width 4=height 5=name
+    pub current_field: usize, // 0=wallpaper_color 1=frame 2=orientation 3=width 4=height
+                              // 5=placard_color 6=placard_text 7=placard_opacity 8=name
 }
 
 impl Default for DisplayProfileDraft {
@@ -135,6 +142,9 @@ impl Default for DisplayProfileDraft {
             orientation: "horizontal".to_string(),
             canvas_width: "1920".to_string(),
             canvas_height: "1080".to_string(),
+            placard_color: "#F5F1E8".to_string(),
+            placard_text_color: "#1E160C".to_string(),
+            placard_opacity: "90".to_string(),
             name: String::new(),
             current_field: 0,
         }
@@ -714,7 +724,7 @@ impl App {
                     if self.display_detail_field > 0 { self.display_detail_field -= 1; }
                 }
                 KeyCode::Down | KeyCode::Char('j') => {
-                    if self.display_detail_field < 4 { self.display_detail_field += 1; }
+                    if self.display_detail_field < 7 { self.display_detail_field += 1; }
                 }
                 KeyCode::Enter | KeyCode::Char('e') => match self.display_detail_field {
                     0 => {
@@ -729,6 +739,18 @@ impl App {
                     }
                     4 => {
                         let v = self.display_profiles[self.display_selected].canvas_height.to_string();
+                        self.display_mode = DisplayScreenMode::EditingText(v);
+                    }
+                    5 => {
+                        let v = self.display_profiles[self.display_selected].placard_color.clone();
+                        self.display_mode = DisplayScreenMode::EditingText(v);
+                    }
+                    6 => {
+                        let v = self.display_profiles[self.display_selected].placard_text_color.clone();
+                        self.display_mode = DisplayScreenMode::EditingText(v);
+                    }
+                    7 => {
+                        let v = self.display_profiles[self.display_selected].placard_opacity.to_string();
                         self.display_mode = DisplayScreenMode::EditingText(v);
                     }
                     _ => {}
@@ -757,12 +779,20 @@ impl App {
                                 self.display_profiles[idx].canvas_height = v;
                             }
                         }
+                        5 => self.display_profiles[idx].placard_color = buf.clone(),
+                        6 => self.display_profiles[idx].placard_text_color = buf.clone(),
+                        7 => {
+                            if let Ok(v) = buf.parse::<u32>() {
+                                self.display_profiles[idx].placard_opacity = v.min(100);
+                            }
+                        }
                         _ => {}
                     }
                     let p = &self.display_profiles[idx];
                     db::update_display_profile_fields(
                         &self.conn, p.id, &p.wallpaper_color, &p.frame_style,
                         &p.orientation, p.canvas_width, p.canvas_height,
+                        &p.placard_color, &p.placard_text_color, p.placard_opacity,
                     ).expect("db update display");
                     self.display_mode = DisplayScreenMode::Detail;
                 }
@@ -777,7 +807,7 @@ impl App {
                     }
                 }
                 KeyCode::Down | KeyCode::Char('j') => {
-                    if self.new_display_draft.current_field < 5 {
+                    if self.new_display_draft.current_field < 8 {
                         self.new_display_draft.current_field += 1;
                     }
                 }
@@ -801,6 +831,18 @@ impl App {
                         self.display_mode = DisplayScreenMode::CreatingEditText(v);
                     }
                     5 => {
+                        let v = self.new_display_draft.placard_color.clone();
+                        self.display_mode = DisplayScreenMode::CreatingEditText(v);
+                    }
+                    6 => {
+                        let v = self.new_display_draft.placard_text_color.clone();
+                        self.display_mode = DisplayScreenMode::CreatingEditText(v);
+                    }
+                    7 => {
+                        let v = self.new_display_draft.placard_opacity.clone();
+                        self.display_mode = DisplayScreenMode::CreatingEditText(v);
+                    }
+                    8 => {
                         let default_name = self.display_default_name();
                         let start = if self.new_display_draft.name.is_empty() {
                             default_name
@@ -827,9 +869,12 @@ impl App {
                 KeyCode::Backspace => { buf.pop(); self.display_mode = DisplayScreenMode::CreatingEditText(buf); }
                 KeyCode::Enter => {
                     match self.new_display_draft.current_field {
-                        0 => self.new_display_draft.wallpaper_color = buf,
-                        3 => self.new_display_draft.canvas_width     = buf,
-                        4 => self.new_display_draft.canvas_height    = buf,
+                        0 => self.new_display_draft.wallpaper_color    = buf,
+                        3 => self.new_display_draft.canvas_width       = buf,
+                        4 => self.new_display_draft.canvas_height      = buf,
+                        5 => self.new_display_draft.placard_color      = buf,
+                        6 => self.new_display_draft.placard_text_color = buf,
+                        7 => self.new_display_draft.placard_opacity    = buf,
                         _ => {}
                     }
                     self.display_mode = DisplayScreenMode::CreatingProfile;
@@ -846,9 +891,11 @@ impl App {
                         let d = &self.new_display_draft;
                         let w = d.canvas_width.parse::<u32>().unwrap_or(1920);
                         let h = d.canvas_height.parse::<u32>().unwrap_or(1080);
+                        let opacity = d.placard_opacity.parse::<u32>().unwrap_or(90).min(100);
                         let id = db::insert_display_profile(
                             &self.conn, &buf, &d.wallpaper_color, &d.frame_style,
                             &d.orientation, w, h,
+                            &d.placard_color, &d.placard_text_color, opacity,
                         ).expect("db insert display");
                         self.display_profiles.push(DisplayProfile {
                             id,
@@ -858,6 +905,9 @@ impl App {
                             orientation: d.orientation.clone(),
                             canvas_width: w,
                             canvas_height: h,
+                            placard_color: d.placard_color.clone(),
+                            placard_text_color: d.placard_text_color.clone(),
+                            placard_opacity: opacity,
                         });
                         self.display_selected = self.display_profiles.len() - 1;
                         self.display_mode = DisplayScreenMode::Browse;
@@ -865,7 +915,7 @@ impl App {
                 }
                 KeyCode::Esc => {
                     self.new_display_draft.name = buf;
-                    self.new_display_draft.current_field = 5;
+                    self.new_display_draft.current_field = 8;
                     self.display_mode = DisplayScreenMode::CreatingProfile;
                 }
                 _ => {}
@@ -887,6 +937,7 @@ impl App {
         db::update_display_profile_fields(
             &self.conn, p.id, &p.wallpaper_color, &p.frame_style,
             &p.orientation, p.canvas_width, p.canvas_height,
+            &p.placard_color, &p.placard_text_color, p.placard_opacity,
         ).expect("db update orientation");
     }
 
