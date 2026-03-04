@@ -91,6 +91,8 @@ pub fn open() -> Result<Connection> {
         [],
     );
 
+    seed_defaults(&conn)?;
+
     Ok(conn)
 }
 
@@ -264,5 +266,31 @@ pub fn update_display_profile_fields(
             id,
         ],
     )?;
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Default seed data
+// ---------------------------------------------------------------------------
+
+fn seed_defaults(conn: &Connection) -> Result<()> {
+    let taste_count: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM taste_profiles", [], |r| r.get(0),
+    )?;
+    if taste_count == 0 {
+        let id = insert_taste_profile(conn, "European Paintings", None, None, true)?;
+        add_taste_profile_department(conn, id, "European Paintings")?;
+    }
+
+    let display_count: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM display_profiles", [], |r| r.get(0),
+    )?;
+    if display_count == 0 {
+        insert_display_profile(
+            conn, "Default", "#1a1a1a", "", "horizontal", 1920, 1080,
+            "#4a4a4a", "#ffffff", 90,
+        )?;
+    }
+
     Ok(())
 }
