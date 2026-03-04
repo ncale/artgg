@@ -264,14 +264,19 @@ def cmd_fetch_images(delay: float, limit: int | None):
 
         time.sleep(delay)
 
+    # Show remaining count before closing
+    still_pending = conn.execute(
+        "SELECT COUNT(*) FROM artworks WHERE image_url IS NULL"
+    ).fetchone()[0]
+
     conn.close()
 
     print(f"\nDone.")
     print(f"  {fetched} image URLs fetched")
     print(f"  {no_image} objects have no image (marked as empty)")
-    print(f"  {errors} errors")
-    pending_after = conn.execute if False else None
-    print(f"\nRun again to continue fetching remaining objects.")
+    print(f"  {errors} errors (image_url left NULL — will retry on next run)")
+    if still_pending > 0:
+        print(f"  {still_pending} objects still pending — run again to continue.")
 
 
 # ---------------------------------------------------------------------------
