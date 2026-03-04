@@ -47,12 +47,21 @@ pub fn run(params: BuildParams, tx: Sender<BuildMessage>) {
     };
 
     if artworks.is_empty() {
-        send!(BuildMessage::Error(
-            "No artworks found matching your taste profile.\n\
-             • Run:  python scripts/build_db.py fetch-images\n\
-             • Then try building again."
-                .to_string(),
-        ));
+        // Try to give a specific reason.
+        let seeded = collection::count_seeded(&params.collection_db_path).unwrap_or(0);
+        let msg = if seeded == 0 {
+            "collection.db has no image URLs yet.\n\
+             Run:  python scripts/build_db.py fetch-images\n\
+             (this takes a while — it's resumable with Ctrl+C)"
+                .to_string()
+        } else {
+            format!(
+                "No artworks match your taste profile ({} images available in collection).\n\
+                 Try removing date or keyword filters.",
+                seeded
+            )
+        };
+        send!(BuildMessage::Error(msg));
         return;
     }
 

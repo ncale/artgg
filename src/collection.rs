@@ -51,6 +51,18 @@ pub fn find_collection_db() -> Option<String> {
 // Query
 // ---------------------------------------------------------------------------
 
+/// How many artworks have a real (fetched) image URL in the DB.
+/// Used to produce a helpful error when a build returns 0 results.
+pub fn count_seeded(db_path: &str) -> Result<i64> {
+    let conn = Connection::open(db_path)?;
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM artworks WHERE image_url LIKE 'https://images.metmuseum.org%'",
+        [],
+        |row| row.get(0),
+    )?;
+    Ok(n)
+}
+
 pub fn query_artworks(db_path: &str, taste: &TasteProfile, count: usize) -> Result<Vec<Artwork>> {
     let conn = Connection::open(db_path)
         .with_context(|| format!("Cannot open collection DB at '{}'", db_path))?;
@@ -82,8 +94,7 @@ fn query_inner(conn: &Connection, taste: &TasteProfile, count: usize) -> Result<
             "SELECT object_id, title, artist_display, date_display, medium, image_url
              FROM artworks
              WHERE is_public_domain = 1
-               AND image_url IS NOT NULL
-               AND image_url != ''
+               AND image_url LIKE 'https://images.metmuseum.org%'
                AND (?1 IS NULL OR year_approx IS NULL OR year_approx >= ?1)
                AND (?2 IS NULL OR year_approx IS NULL OR year_approx <= ?2)
              ORDER BY RANDOM()
@@ -109,8 +120,7 @@ fn query_inner(conn: &Connection, taste: &TasteProfile, count: usize) -> Result<
              JOIN artworks_fts ON artworks_fts.rowid = a.object_id
              WHERE artworks_fts MATCH ?1
                AND a.is_public_domain = 1
-               AND a.image_url IS NOT NULL
-               AND a.image_url != ''
+               AND a.image_url LIKE 'https://images.metmuseum.org%'
                AND (?2 IS NULL OR a.year_approx IS NULL OR a.year_approx >= ?2)
                AND (?3 IS NULL OR a.year_approx IS NULL OR a.year_approx <= ?3)
              ORDER BY RANDOM()
@@ -133,7 +143,7 @@ fn query_no_year(conn: &Connection, taste: &TasteProfile, count: usize) -> Resul
             "SELECT object_id, title, artist_display, date_display, medium, image_url
              FROM artworks
              WHERE is_public_domain = 1
-               AND image_url IS NOT NULL AND image_url != ''
+               AND image_url LIKE 'https://images.metmuseum.org%'
              ORDER BY RANDOM()
              LIMIT ?1",
         )?;
