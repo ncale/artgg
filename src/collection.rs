@@ -1,8 +1,8 @@
 use anyhow::{Context, Result};
 use rusqlite::Connection;
-use std::env;
 
 use crate::app::TasteProfile;
+use crate::db;
 
 // ---------------------------------------------------------------------------
 // Artwork model
@@ -15,53 +15,39 @@ pub struct Artwork {
     pub artist_display: Option<String>,
     pub date_display: Option<String>,
     pub medium: Option<String>,
-    pub image_url: String,
 }
 
 // ---------------------------------------------------------------------------
 // DB location
 // ---------------------------------------------------------------------------
 
-pub fn find_collection_db() -> Option<String> {
-    let home = env::var("HOME").unwrap_or_default();
-    let candidates = vec![
-        // Development: run from project root
-        "./assets/collection.db".to_string(),
-        // Installed alongside binary
-        {
-            if let Ok(exe) = std::env::current_exe() {
-                exe.parent()
-                    .map(|p| p.join("assets/collection.db").to_string_lossy().into_owned())
-                    .unwrap_or_default()
-            } else {
-                String::new()
-            }
-        },
-        // User data dir
-        format!("{}/.local/share/artgg/collection.db", home),
-    ];
+pub fn find_collection_db() -> Option<std::path::PathBuf> {
+    let candidates: Vec<std::path::PathBuf> = {
+        let mut v = vec![
+            // Development: run from project root
+            std::path::PathBuf::from("./assets/collection.db"),
+            // Installed alongside binary
+            std::env::current_exe()
+                .ok()
+                .and_then(|p| p.parent().map(|d| d.join("assets/collection.db")))
+                .unwrap_or_default(),
+        ];
+        // Runtime-downloaded: dirs-based data dir
+        if let Ok(data) = db::data_dir() {
+            v.push(data.join("collection.db"));
+        }
+        v
+    };
 
     candidates
         .into_iter()
-        .filter(|p| !p.is_empty())
-        .find(|p| std::path::Path::new(p).exists())
+        .filter(|p| !p.as_os_str().is_empty())
+        .find(|p| p.exists())
 }
 
 // ---------------------------------------------------------------------------
 // Query
 // ---------------------------------------------------------------------------
-
-/// How many artworks have a real (fetched) image URL in the DB.
-/// Used to produce a helpful error when a build returns 0 results.
-pub fn count_seeded(db_path: &str) -> Result<i64> {
-    let conn = Connection::open(db_path)?;
-    let n: i64 = conn.query_row(
-        "SELECT COUNT(*) FROM artworks WHERE image_url LIKE 'https://images.metmuseum.org%'",
-        [],
-        |row| row.get(0),
-    )?;
-    Ok(n)
-}
 
 /// Return all distinct department names from the collection DB, sorted.
 pub fn load_departments(db_path: &str) -> Result<Vec<String>> {
@@ -115,10 +101,9 @@ fn query_inner(conn: &Connection, taste: &TasteProfile, count: usize) -> Result<
     };
 
     let sql = format!(
-        "SELECT object_id, title, artist_display, date_display, medium, image_url
+        "SELECT object_id, title, artist_display, date_display, medium
          FROM artworks
          WHERE is_public_domain = 1
-           AND image_url LIKE 'https://images.metmuseum.org%'
            AND (? IS NULL OR year_approx IS NULL OR year_approx >= ?)
            AND (? IS NULL OR year_approx IS NULL OR year_approx <= ?)
            {}ORDER BY RANDOM()
@@ -133,7 +118,7 @@ fn query_inner(conn: &Connection, taste: &TasteProfile, count: usize) -> Result<
     for dept in &taste.departments {
         params.push(Value::Text(dept.clone()));
     }
-    params.push(Value::Integer(count as i64));
+    params.push(Value::Integer((count * 2) as i64));
 
     let rows = stmt
         .query_map(rusqlite::params_from_iter(params), row_to_artwork)?
@@ -156,10 +141,9 @@ fn query_no_year(conn: &Connection, taste: &TasteProfile, count: usize) -> Resul
     };
 
     let sql = format!(
-        "SELECT object_id, title, artist_display, date_display, medium, image_url
+        "SELECT object_id, title, artist_display, date_display, medium
          FROM artworks
          WHERE is_public_domain = 1
-           AND image_url LIKE 'https://images.metmuseum.org%'
            {}ORDER BY RANDOM()
          LIMIT ?",
         dept_clause
@@ -170,7 +154,7 @@ fn query_no_year(conn: &Connection, taste: &TasteProfile, count: usize) -> Resul
     let mut params: Vec<Value> = taste.departments.iter()
         .map(|d| Value::Text(d.clone()))
         .collect();
-    params.push(Value::Integer(count as i64));
+    params.push(Value::Integer((count * 2) as i64));
 
     let rows = stmt
         .query_map(rusqlite::params_from_iter(params), row_to_artwork)?
@@ -185,6 +169,5 @@ fn row_to_artwork(row: &rusqlite::Row<'_>) -> rusqlite::Result<Artwork> {
         artist_display: row.get(2)?,
         date_display:   row.get(3)?,
         medium:         row.get(4)?,
-        image_url:      row.get::<_, Option<String>>(5)?.unwrap_or_default(),
     })
 }

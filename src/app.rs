@@ -1,12 +1,68 @@
 use anyhow::Result;
 use crossterm::event::KeyCode;
 use rusqlite::Connection;
-use std::env;
+use std::path::PathBuf;
 use std::sync::mpsc::Receiver;
 
 use crate::build::{self, BuildParams};
 use crate::collection;
 use crate::db;
+
+// ---------------------------------------------------------------------------
+// Collection DB versioning
+// ---------------------------------------------------------------------------
+
+pub const DB_VERSION: &str = "v1";
+pub const DB_URL: &str = concat!(
+    "https://github.com/ncale/artgg/releases/download/db-",
+    "v1",
+    "/collection.db"
+);
+
+/// Ensure `collection.db` is available, downloading it if necessary.
+/// Must be called before raw mode is enabled (uses `println!`).
+pub fn ensure_collection_db() -> anyhow::Result<PathBuf> {
+    // Dev override: local assets dir takes priority, no download.
+    let dev_path = PathBuf::from("./assets/collection.db");
+    if dev_path.exists() {
+        return Ok(dev_path);
+    }
+
+    let db_path  = db::data_dir()?.join("collection.db");
+    let ver_path = db::data_dir()?.join("collection.db.version");
+
+    let version_ok = ver_path.exists()
+        && std::fs::read_to_string(&ver_path)
+            .map(|v| v.trim() == DB_VERSION)
+            .unwrap_or(false);
+
+    if db_path.exists() && version_ok {
+        return Ok(db_path);
+    }
+
+    println!("Downloading collection database ({DB_VERSION})...");
+
+    let client = reqwest::blocking::Client::builder()
+        .timeout(std::time::Duration::from_secs(120))
+        .user_agent("artgg/0.1 (wallpaper generator)")
+        .build()?;
+
+    let resp = client.get(DB_URL).send()?;
+    if !resp.status().is_success() {
+        return Err(anyhow::anyhow!(
+            "Failed to download collection database: HTTP {}\nURL: {}",
+            resp.status(),
+            DB_URL
+        ));
+    }
+
+    let bytes = resp.bytes()?;
+    std::fs::write(&db_path, &bytes)?;
+    std::fs::write(&ver_path, DB_VERSION)?;
+
+    println!("Collection database downloaded successfully.");
+    Ok(db_path)
+}
 
 // ---------------------------------------------------------------------------
 // Build progress messages (sent from build thread → main thread)
@@ -247,8 +303,9 @@ pub struct App {
 
 impl App {
     pub fn new() -> Result<Self> {
-        let home = env::var("HOME").unwrap_or_else(|_| "~".to_string());
-        let default_output_dir = format!("{}/.local/share/artgg/gallery", home);
+        let default_output_dir = db::data_dir()
+            .map(|d| d.join("gallery").to_string_lossy().into_owned())
+            .unwrap_or_else(|_| "./gallery".to_string());
 
         let conn = db::open()?;
         let taste_profiles    = db::load_taste_profiles(&conn)?;
@@ -256,6 +313,7 @@ impl App {
 
         // Load departments from collection DB (best-effort; empty if DB not yet built).
         let collection_db = collection::find_collection_db()
+            .map(|p| p.to_string_lossy().into_owned())
             .unwrap_or_else(|| "./assets/collection.db".to_string());
         let available_departments = collection::load_departments(&collection_db).unwrap_or_default();
 
@@ -1035,12 +1093,14 @@ impl App {
     }
 
     fn start_build(&mut self, count: usize) {
-        let home = env::var("HOME").unwrap_or_default();
-
         let collection_db = collection::find_collection_db()
+            .map(|p| p.to_string_lossy().into_owned())
             .unwrap_or_else(|| "./assets/collection.db".to_string());
-        let cache_dir    = format!("{}/.cache/artgg/images", home);
-        let artgg_db_path = db::db_path();
+        let cache_dir = db::cache_dir()
+            .map(|d| d.join("images").to_string_lossy().into_owned())
+            .unwrap_or_else(|_| "./cache/images".to_string());
+        let artgg_db_path = db::db_path()
+            .unwrap_or_else(|_| "./artgg.db".to_string());
 
         // Guard: need valid profile indices.
         if self.taste_profiles.is_empty() || self.display_profiles.is_empty() { return; }
