@@ -18,13 +18,13 @@
 **macOS / Linux:**
 
 ```shell
-curl --proto '=https' --tlsv1.2 -LsSf [https://github.com/ncale/artgg/releases/latest/download/artgg-installer.sh](https://github.com/ncale/artgg/releases/latest/download/artgg-installer.sh) | sh
+curl --proto '=https' --tlsv1.2 -LsSf https://github.com/ncale/artgg/releases/download/v0.1.0/artgg-installer.sh | sh
 ```
 
 **Windows (PowerShell):**
 
 ```powershell
-irm [https://github.com/ncale/artgg/releases/latest/download/artgg-installer.ps1](https://github.com/ncale/artgg/releases/latest/download/artgg-installer.ps1) | iex
+powershell -ExecutionPolicy Bypass -c "irm https://github.com/ncale/artgg/releases/download/v0.1.0/artgg-installer.ps1 | iex"
 ```
 
 ## ⌨️ Usage

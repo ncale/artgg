@@ -3,7 +3,7 @@ name = "artgg"
 version = "0.1.0"
 edition = "2021"
 description = "Generate desktop wallpapers from open access artwork with museum-style placards"
-repository = "https://github.com/nickbrodeur/artgg"
+repository = "https://github.com/ncale/artgg"
 license = "MIT"
 
 rust-version = "1.70"
