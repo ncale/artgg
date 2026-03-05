@@ -2,6 +2,7 @@ use std::sync::mpsc::Sender;
 
 use crate::app::{BuildMessage, DisplayProfile, TasteProfile};
 use crate::collection;
+use crate::db;
 use crate::renderer;
 
 // ---------------------------------------------------------------------------
@@ -18,6 +19,50 @@ pub struct BuildParams {
     pub artgg_db_path:      String,
 }
 
+// ---------------------------------------------------------------------------
+// Met API
+// ---------------------------------------------------------------------------
+
+#[derive(serde::Deserialize)]
+struct MetObjectResponse {
+    #[serde(rename = "primaryImageSmall", default)]
+    primary_image_small: String,
+    #[serde(rename = "primaryImage", default)]
+    primary_image: String,
+}
+
+fn fetch_image_url(
+    client: &reqwest::blocking::Client,
+    object_id: i64,
+) -> anyhow::Result<Option<String>> {
+    let url = format!(
+        "https://collectionapi.metmuseum.org/public/collection/v1/objects/{}",
+        object_id
+    );
+    let resp = client.get(&url).send()?;
+
+    if resp.status().as_u16() == 404 {
+        return Ok(None);
+    }
+    if !resp.status().is_success() {
+        return Err(anyhow::anyhow!("Met API error: HTTP {}", resp.status()));
+    }
+
+    let data: MetObjectResponse = resp.json()?;
+    let image_url = if !data.primary_image_small.is_empty() {
+        Some(data.primary_image_small)
+    } else if !data.primary_image.is_empty() {
+        Some(data.primary_image)
+    } else {
+        None
+    };
+    Ok(image_url)
+}
+
+// ---------------------------------------------------------------------------
+// Build runner
+// ---------------------------------------------------------------------------
+
 /// Run the full build pipeline in a background thread.
 /// Sends progress via `tx`; errors are non-fatal (skipped artworks).
 pub fn run(params: BuildParams, tx: Sender<BuildMessage>) {
@@ -27,10 +72,10 @@ pub fn run(params: BuildParams, tx: Sender<BuildMessage>) {
         };
     }
 
-    // ── 1. Query artworks ──────────────────────────────────────────────────
+    // ── 1. Query artworks (2x headroom for filtering) ──────────────────────
     send!(BuildMessage::Phase("Querying collection…".to_string()));
 
-    let artworks = match collection::query_artworks(
+    let candidates = match collection::query_artworks(
         &params.collection_db_path,
         &params.taste,
         params.count,
@@ -38,36 +83,23 @@ pub fn run(params: BuildParams, tx: Sender<BuildMessage>) {
         Ok(a) => a,
         Err(e) => {
             send!(BuildMessage::Error(format!(
-                "Failed to query collection DB: {}\n\
-                 Make sure collection.db exists and 'fetch-images' has been run.",
+                "Failed to query collection DB: {}",
                 e
             )));
             return;
         }
     };
 
-    if artworks.is_empty() {
-        // Try to give a specific reason.
-        let seeded = collection::count_seeded(&params.collection_db_path).unwrap_or(0);
-        let msg = if seeded == 0 {
-            "collection.db has no image URLs yet.\n\
-             Run:  python scripts/build_db.py fetch-images\n\
-             (this takes a while — it's resumable with Ctrl+C)"
-                .to_string()
-        } else {
-            format!(
-                "No artworks match your taste profile ({} images available in collection).\n\
-                 Try removing date or keyword filters.",
-                seeded
-            )
-        };
-        send!(BuildMessage::Error(msg));
+    if candidates.is_empty() {
+        send!(BuildMessage::Error(
+            "No artworks match your taste profile.".to_string()
+        ));
         return;
     }
 
-    let total = artworks.len();
+    let total = candidates.len();
     send!(BuildMessage::Phase(format!(
-        "Found {} artworks — downloading & rendering…",
+        "Found {} candidates — fetching URLs & rendering…",
         total
     )));
 
@@ -115,15 +147,75 @@ pub fn run(params: BuildParams, tx: Sender<BuildMessage>) {
         }
     };
 
-    // ── 6. Download + render loop ──────────────────────────────────────────
+    // ── 6. Open artgg.db for url_cache ─────────────────────────────────────
+    let url_conn = match rusqlite::Connection::open(&params.artgg_db_path) {
+        Ok(c) => c,
+        Err(e) => {
+            send!(BuildMessage::Error(format!("Cannot open artgg.db: {}", e)));
+            return;
+        }
+    };
+
+    // ── 7. Download + render loop ──────────────────────────────────────────
     let mut produced = 0usize;
     let mut skipped  = 0usize;
 
-    for (i, artwork) in artworks.iter().enumerate() {
+    for (i, artwork) in candidates.iter().enumerate() {
+        if produced == params.count {
+            break;
+        }
+
         let cache_path  = format!("{}/{}.jpg", params.cache_dir, artwork.object_id);
         let output_path = format!("{}/{}.jpg", params.output_dir, artwork.object_id);
 
-        // Download if not already cached.
+        // ── Resolve image URL (cache → Met API) ────────────────────────────
+        let image_url: String = match db::get_url_cache(&url_conn, artwork.object_id) {
+            Ok(Some(entry)) if !entry.is_valid => {
+                // Permanently no image — skip.
+                skipped += 1;
+                continue;
+            }
+            Ok(Some(entry)) => {
+                // Cache hit.
+                match entry.image_url {
+                    Some(u) => u,
+                    None => { skipped += 1; continue; }
+                }
+            }
+            _ => {
+                // Cache miss — fetch from Met API.
+                send!(BuildMessage::Progress {
+                    current: i,
+                    total,
+                    message: format!("↓ Fetching URL: {}", artwork.title),
+                });
+
+                match fetch_image_url(&client, artwork.object_id) {
+                    Ok(Some(url)) => {
+                        let _ = db::upsert_url_cache_valid(&url_conn, artwork.object_id, &url);
+                        std::thread::sleep(std::time::Duration::from_millis(400));
+                        url
+                    }
+                    Ok(None) => {
+                        let _ = db::upsert_url_cache_invalid(&url_conn, artwork.object_id);
+                        skipped += 1;
+                        continue;
+                    }
+                    Err(e) => {
+                        send!(BuildMessage::Progress {
+                            current: i,
+                            total,
+                            message: format!("✗ URL fetch failed ({}): {}", artwork.title, e),
+                        });
+                        skipped += 1;
+                        std::thread::sleep(std::time::Duration::from_secs(1));
+                        continue;
+                    }
+                }
+            }
+        };
+
+        // ── Download image (if not disk-cached) ────────────────────────────
         if !std::path::Path::new(&cache_path).exists() {
             send!(BuildMessage::Progress {
                 current: i,
@@ -131,7 +223,17 @@ pub fn run(params: BuildParams, tx: Sender<BuildMessage>) {
                 message: format!("↓ Downloading: {}", artwork.title),
             });
 
-            match client.get(&artwork.image_url).send() {
+            match client.get(&image_url).send() {
+                Ok(resp) if !resp.status().is_success() => {
+                    let _ = db::upsert_url_cache_invalid(&url_conn, artwork.object_id);
+                    send!(BuildMessage::Progress {
+                        current: i,
+                        total,
+                        message: format!("✗ HTTP {} for: {}", resp.status(), artwork.title),
+                    });
+                    skipped += 1;
+                    continue;
+                }
                 Ok(resp) => match resp.bytes() {
                     Ok(bytes) => {
                         if let Err(e) = std::fs::write(&cache_path, &bytes) {
@@ -143,6 +245,7 @@ pub fn run(params: BuildParams, tx: Sender<BuildMessage>) {
                             skipped += 1;
                             continue;
                         }
+                        std::thread::sleep(std::time::Duration::from_millis(400));
                     }
                     Err(e) => {
                         send!(BuildMessage::Progress {
@@ -166,9 +269,6 @@ pub fn run(params: BuildParams, tx: Sender<BuildMessage>) {
                     continue;
                 }
             }
-
-            // Polite rate-limiting between downloads.
-            std::thread::sleep(std::time::Duration::from_millis(400));
         } else {
             send!(BuildMessage::Progress {
                 current: i,
@@ -177,7 +277,7 @@ pub fn run(params: BuildParams, tx: Sender<BuildMessage>) {
             });
         }
 
-        // Render wallpaper.
+        // ── Render wallpaper ───────────────────────────────────────────────
         send!(BuildMessage::Progress {
             current: i,
             total,
@@ -224,7 +324,18 @@ pub fn run(params: BuildParams, tx: Sender<BuildMessage>) {
         }
     }
 
-    // ── 7. Record build history ────────────────────────────────────────────
+    if produced < params.count {
+        send!(BuildMessage::Progress {
+            current: produced,
+            total,
+            message: format!(
+                "Note: produced {} of {} requested (not enough valid artworks)",
+                produced, params.count
+            ),
+        });
+    }
+
+    // ── 8. Record build history ────────────────────────────────────────────
     let _ = record_build(&params, produced as i64);
 
     send!(BuildMessage::Done {

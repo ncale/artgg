@@ -16,6 +16,10 @@ use ratatui::{backend::CrosstermBackend, Terminal};
 use std::io;
 
 fn main() -> Result<()> {
+    if let Err(e) = app::ensure_collection_db() {
+        eprintln!("Error: {e}");
+        std::process::exit(1);
+    }
     enable_raw_mode()?;
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;

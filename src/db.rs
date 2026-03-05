@@ -1,6 +1,6 @@
 use anyhow::Result;
 use rusqlite::Connection;
-use std::{env, fs};
+use std::{fs, path::PathBuf};
 
 use crate::app::{DisplayProfile, TasteProfile};
 
@@ -8,9 +8,24 @@ use crate::app::{DisplayProfile, TasteProfile};
 // Path helpers
 // ---------------------------------------------------------------------------
 
-pub fn db_path() -> String {
-    let home = env::var("HOME").unwrap_or_else(|_| "~".to_string());
-    format!("{}/.local/share/artgg/artgg.db", home)
+pub fn data_dir() -> anyhow::Result<PathBuf> {
+    let dir = dirs::data_local_dir()
+        .ok_or_else(|| anyhow::anyhow!("Cannot determine user data directory"))?
+        .join("artgg");
+    fs::create_dir_all(&dir)?;
+    Ok(dir)
+}
+
+pub fn cache_dir() -> anyhow::Result<PathBuf> {
+    let dir = dirs::cache_dir()
+        .ok_or_else(|| anyhow::anyhow!("Cannot determine cache directory"))?
+        .join("artgg");
+    fs::create_dir_all(&dir)?;
+    Ok(dir)
+}
+
+pub fn db_path() -> anyhow::Result<String> {
+    Ok(data_dir()?.join("artgg.db").to_string_lossy().into_owned())
 }
 
 // ---------------------------------------------------------------------------
@@ -18,10 +33,7 @@ pub fn db_path() -> String {
 // ---------------------------------------------------------------------------
 
 pub fn open() -> Result<Connection> {
-    let home = env::var("HOME").unwrap_or_else(|_| "~".to_string());
-    let dir  = format!("{}/.local/share/artgg", home);
-    fs::create_dir_all(&dir)?;
-    let path = format!("{}/artgg.db", dir);
+    let path = db_path()?;
     let conn = Connection::open(&path)?;
     conn.execute_batch(
         "PRAGMA foreign_keys = ON;
@@ -45,6 +57,12 @@ pub fn open() -> Result<Connection> {
             display_profile_id INTEGER,
             output_dir         TEXT NOT NULL DEFAULT '',
             count              INTEGER NOT NULL DEFAULT 0
+         );
+         CREATE TABLE IF NOT EXISTS url_cache (
+            object_id  INTEGER PRIMARY KEY,
+            image_url  TEXT,
+            is_valid   INTEGER NOT NULL DEFAULT 1,
+            fetched_at INTEGER NOT NULL DEFAULT (unixepoch())
          );",
     )?;
 
@@ -265,6 +283,53 @@ pub fn update_display_profile_fields(
             placard_color, placard_text_color, placard_opacity as i64,
             id,
         ],
+    )?;
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// URL cache
+// ---------------------------------------------------------------------------
+
+pub struct UrlCacheEntry {
+    #[allow(dead_code)]
+    pub object_id: i64,
+    pub image_url: Option<String>,
+    pub is_valid: bool,
+}
+
+pub fn get_url_cache(conn: &Connection, object_id: i64) -> Result<Option<UrlCacheEntry>> {
+    let mut stmt = conn.prepare(
+        "SELECT object_id, image_url, is_valid FROM url_cache WHERE object_id = ?1",
+    )?;
+    let mut rows = stmt.query_map([object_id], |row| {
+        Ok(UrlCacheEntry {
+            object_id: row.get(0)?,
+            image_url: row.get(1)?,
+            is_valid: row.get::<_, i64>(2)? != 0,
+        })
+    })?;
+    Ok(rows.next().transpose()?)
+}
+
+pub fn upsert_url_cache_valid(conn: &Connection, object_id: i64, image_url: &str) -> Result<()> {
+    conn.execute(
+        "INSERT INTO url_cache (object_id, image_url, is_valid, fetched_at)
+         VALUES (?1, ?2, 1, unixepoch())
+         ON CONFLICT(object_id) DO UPDATE SET image_url = excluded.image_url,
+             is_valid = 1, fetched_at = unixepoch()",
+        rusqlite::params![object_id, image_url],
+    )?;
+    Ok(())
+}
+
+pub fn upsert_url_cache_invalid(conn: &Connection, object_id: i64) -> Result<()> {
+    conn.execute(
+        "INSERT INTO url_cache (object_id, image_url, is_valid, fetched_at)
+         VALUES (?1, NULL, 0, unixepoch())
+         ON CONFLICT(object_id) DO UPDATE SET image_url = NULL,
+             is_valid = 0, fetched_at = unixepoch()",
+        rusqlite::params![object_id],
     )?;
     Ok(())
 }
