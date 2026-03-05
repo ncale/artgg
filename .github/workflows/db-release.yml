@@ -1,0 +1,39 @@
+name: Database Release
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Database version (e.g. v1, v2)'
+        required: true
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          lfs: true  # pulls down your LFS source file
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install uv
+        run: pip install uv
+
+      - name: Install dependencies
+        run: uv sync
+        working-directory: scripts/
+
+      - name: Generate database
+        run: uv run python build_db.py
+        working-directory: scripts/
+
+      - name: Upload database to release
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: db-${{ github.event.inputs.version }}
+          name: Database ${{ github.event.inputs.version }}
+          files: assets/collection.db
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
