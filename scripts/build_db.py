@@ -2,17 +2,12 @@
 """
 build_db.py — Builds the Met Museum collection SQLite database from the local CSV.
 
-Command:
-  build   Build the DB from the local CSV (default)
-
 Source CSV: ../assets/raw/MetObjects.csv
 Output DB:  ../assets/collection.db
 Schema:     ./schema.sql
 
 Usage:
-    uv run python build_db.py build
-
-Python 3.10+ recommended.
+    uv run python build_db.py
 """
 
 import sqlite3
@@ -22,9 +17,6 @@ import re
 import sys
 import argparse
 
-# ---------------------------------------------------------------------------
-# Paths (all relative to this script's location)
-# ---------------------------------------------------------------------------
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 ASSETS_DIR = os.path.join(SCRIPT_DIR, "..", "assets")
 CSV_PATH = os.path.join(ASSETS_DIR, "raw", "MetObjects.csv")
@@ -32,11 +24,7 @@ DB_PATH = os.path.join(ASSETS_DIR, "collection.db")
 SCHEMA_PATH = os.path.join(SCRIPT_DIR, "schema.sql")
 
 
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
 def build_artist_display(row: dict) -> str:
-    """Combine artist name + nationality/dates into a single display string."""
     name = row.get("Artist Display Name", "").strip()
     nationality = row.get("Artist Nationality", "").strip()
     begin_date = row.get("Artist Begin Date", "").strip()
@@ -56,7 +44,6 @@ def build_artist_display(row: dict) -> str:
 
 
 def normalize_tags(raw: str) -> str:
-    """Convert pipe-separated tag strings to lowercase pipe-separated."""
     if not raw:
         return ""
     tags = [t.strip().lower() for t in raw.split("|") if t.strip()]
@@ -64,7 +51,6 @@ def normalize_tags(raw: str) -> str:
 
 
 def extract_year(date_display: str) -> int | None:
-    """Extract the first 4-digit year from a date string."""
     if not date_display:
         return None
     m = re.search(r"\b(\d{4})\b", date_display)
@@ -72,17 +58,20 @@ def extract_year(date_display: str) -> int | None:
 
 
 def should_include(row: dict) -> bool:
-    """Only keep public-domain rows that have some link resource."""
     return (
         row.get("Is Public Domain", "").strip() == "True"
         and row.get("Link Resource", "").strip() != ""
     )
 
 
-# ---------------------------------------------------------------------------
-# Command: build
-# ---------------------------------------------------------------------------
-def cmd_build():
+def main():
+    parser = argparse.ArgumentParser(
+        description="Build the artgg collection database from MetObjects.csv.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=__doc__,
+    )
+    parser.parse_args()
+
     if not os.path.exists(CSV_PATH):
         print(f"ERROR: CSV not found at {CSV_PATH}")
         print("Download MetObjects.csv from https://github.com/metmuseum/openaccess")
@@ -98,7 +87,7 @@ def cmd_build():
         print(f"Removed existing database at {DB_PATH}")
 
     print(f"Reading schema from {SCHEMA_PATH}")
-    with open(SCHEMA_PATH, "r") as f:
+    with open(SCHEMA_PATH) as f:
         schema_sql = f.read()
 
     print(f"Creating database at {DB_PATH}")
@@ -126,15 +115,13 @@ def cmd_build():
             date_display = row.get("Object Date", "").strip() or None
             year_approx = extract_year(date_display) if date_display else None
 
-            # image_url stays NULL — fetched at runtime by artgg.
             conn.execute(
                 """
                 INSERT OR IGNORE INTO artworks (
                     object_id, title, artist_display, date_display, medium,
                     dimensions, classification, culture, period, dynasty,
-                    department, object_name, tags, image_url, is_public_domain,
-                    year_approx
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?)
+                    department, object_name, tags, is_public_domain, year_approx
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     object_id,
@@ -165,29 +152,7 @@ def cmd_build():
 
     print(f"\nDone. {inserted} artworks inserted, {skipped} rows skipped.")
     print(f"Database written to: {DB_PATH}")
-    print(
-        "\nDatabase ready. Image URLs will be fetched at runtime by artgg."
-    )
-
-
-# ---------------------------------------------------------------------------
-# Entry point
-# ---------------------------------------------------------------------------
-def main():
-    parser = argparse.ArgumentParser(
-        description="artgg database builder",
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog=__doc__,
-    )
-    subparsers = parser.add_subparsers(dest="command")
-    subparsers.add_parser("build", help="Build the DB from MetObjects.csv")
-
-    args = parser.parse_args()
-
-    if args.command == "build" or args.command is None:
-        cmd_build()
-    else:
-        parser.print_help()
+    print("Image URLs will be fetched at runtime by artgg.")
 
 
 if __name__ == "__main__":
