@@ -25,8 +25,6 @@ CREATE TABLE IF NOT EXISTS artworks (
     -- e.g. "landscapes|trees|night sky"
     tags              TEXT,
 
-    -- Image access
-    image_url         TEXT,    -- primary image URL from the Met API
     is_public_domain  INTEGER, -- 0 or 1 (boolean)
 
     -- Extracted year for date-range filtering (first 4-digit year from date_display)
