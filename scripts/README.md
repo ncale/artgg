@@ -17,28 +17,11 @@ in the distributed binary — it's only needed when regenerating `assets/collect
 
 ## Setup
 
-Python 3.10+ required.
+Python 3.10+ required. Initialize the virtual environment, install the requirements, then run the `build_db.py` script. The `--help` flag has more details about how to use the script.
 
 ```bash
-cd scripts
-python3 -m venv venv
-source venv/bin/activate
-pip3 install -r requirements.txt
+python build_db.py --help
 ```
-
----
-
-## Generating the database
-
-The CSV is already in the repo at `assets/raw/MetObjects.csv`. Just run:
-
-```bash
-python scripts/build_db.py
-```
-
-This will create `assets/collection.db`, which is gitignored. You need to
-regenerate it before building the Rust binary, since it gets embedded via
-`include_bytes!`.
 
 ---
 
@@ -53,19 +36,3 @@ CSV last updated by Met: 2022 (as of project creation)
 The CSV is committed to the repo as an immutable snapshot so builds are fully
 reproducible without network access. If the Met updates the CSV and you want to
 pull in new data, replace the file and re-run `build_db.py`.
-
----
-
-## Schema
-
-`schema.sql` defines the `artworks` table and an FTS5 virtual table for
-full-text search across interest fields (medium, classification, culture, tags, etc.).
-
-If you change the schema, you need to:
-
-1. Update `schema.sql`
-2. Re-run `build_db.py` to regenerate the DB
-3. Update any raw SQL queries in the Rust source that reference changed column names
-
-The Rust side accesses the DB via `include_bytes!` — see `src/db.rs` for query
-definitions. Column names there must match `schema.sql` exactly.
