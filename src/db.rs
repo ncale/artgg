@@ -4,6 +4,10 @@ use std::{fs, path::PathBuf};
 
 use crate::app::{DisplayProfile, TasteProfile};
 
+mod embedded {
+    refinery::embed_migrations!("migrations");
+}
+
 // ---------------------------------------------------------------------------
 // Path helpers
 // ---------------------------------------------------------------------------
@@ -34,83 +38,10 @@ pub fn db_path() -> anyhow::Result<String> {
 
 pub fn open() -> Result<Connection> {
     let path = db_path()?;
-    let conn = Connection::open(&path)?;
-    conn.execute_batch(
-        "PRAGMA foreign_keys = ON;
-         CREATE TABLE IF NOT EXISTS taste_profiles (
-            id   INTEGER PRIMARY KEY AUTOINCREMENT,
-            name TEXT NOT NULL
-         );
-         CREATE TABLE IF NOT EXISTS display_profiles (
-            id   INTEGER PRIMARY KEY AUTOINCREMENT,
-            name TEXT NOT NULL
-         );
-         CREATE TABLE IF NOT EXISTS taste_profile_departments (
-            profile_id INTEGER NOT NULL REFERENCES taste_profiles(id) ON DELETE CASCADE,
-            department TEXT NOT NULL,
-            PRIMARY KEY (profile_id, department)
-         );
-         CREATE TABLE IF NOT EXISTS builds (
-            id                 INTEGER PRIMARY KEY AUTOINCREMENT,
-            created_at         INTEGER NOT NULL DEFAULT (unixepoch()),
-            taste_profile_id   INTEGER,
-            display_profile_id INTEGER,
-            output_dir         TEXT NOT NULL DEFAULT '',
-            count              INTEGER NOT NULL DEFAULT 0
-         );
-         CREATE TABLE IF NOT EXISTS url_cache (
-            object_id  INTEGER PRIMARY KEY,
-            image_url  TEXT,
-            is_valid   INTEGER NOT NULL DEFAULT 1,
-            fetched_at INTEGER NOT NULL DEFAULT (unixepoch())
-         );",
-    )?;
-
-    // taste_profiles migrations
-    let _ = conn.execute("ALTER TABLE taste_profiles ADD COLUMN date_start INTEGER", []);
-    let _ = conn.execute("ALTER TABLE taste_profiles ADD COLUMN date_end INTEGER", []);
-    let _ = conn.execute(
-        "ALTER TABLE taste_profiles ADD COLUMN is_public_domain INTEGER NOT NULL DEFAULT 0",
-        [],
-    );
-
-    // display_profiles migrations
-    let _ = conn.execute(
-        "ALTER TABLE display_profiles ADD COLUMN wallpaper_color TEXT NOT NULL DEFAULT '#1A1A2E'",
-        [],
-    );
-    let _ = conn.execute(
-        "ALTER TABLE display_profiles ADD COLUMN frame_style TEXT NOT NULL DEFAULT ''",
-        [],
-    );
-    let _ = conn.execute(
-        "ALTER TABLE display_profiles ADD COLUMN orientation TEXT NOT NULL DEFAULT 'horizontal'",
-        [],
-    );
-    // Replace aspect_ratio with explicit pixel dimensions.
-    let _ = conn.execute(
-        "ALTER TABLE display_profiles ADD COLUMN canvas_width  INTEGER NOT NULL DEFAULT 1920",
-        [],
-    );
-    let _ = conn.execute(
-        "ALTER TABLE display_profiles ADD COLUMN canvas_height INTEGER NOT NULL DEFAULT 1080",
-        [],
-    );
-    let _ = conn.execute(
-        "ALTER TABLE display_profiles ADD COLUMN placard_color TEXT NOT NULL DEFAULT '#F5F1E8'",
-        [],
-    );
-    let _ = conn.execute(
-        "ALTER TABLE display_profiles ADD COLUMN placard_text_color TEXT NOT NULL DEFAULT '#1E160C'",
-        [],
-    );
-    let _ = conn.execute(
-        "ALTER TABLE display_profiles ADD COLUMN placard_opacity INTEGER NOT NULL DEFAULT 90",
-        [],
-    );
-
+    let mut conn = Connection::open(&path)?;
+    conn.execute_batch("PRAGMA foreign_keys = ON;")?;
+    embedded::migrations::runner().run(&mut conn)?;
     seed_defaults(&conn)?;
-
     Ok(conn)
 }
 
@@ -358,4 +289,33 @@ fn seed_defaults(conn: &Connection) -> Result<()> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn migrations_run_on_fresh_db() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let mut conn = Connection::open(tmp.path()).unwrap();
+        embedded::migrations::runner().run(&mut conn).unwrap();
+        // Verify all expected tables exist
+        let tables: Vec<String> = {
+            let mut s = conn.prepare(
+                "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name"
+            ).unwrap();
+            s.query_map([], |r| r.get(0)).unwrap()
+                .map(|r| r.unwrap()).collect()
+        };
+        for t in &["builds", "display_profiles", "refinery_schema_history",
+                   "taste_profile_departments", "taste_profiles", "url_cache"] {
+            assert!(tables.contains(&t.to_string()), "missing table: {t}");
+        }
+        // Verify migration is recorded
+        let count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM refinery_schema_history", [], |r| r.get(0)
+        ).unwrap();
+        assert_eq!(count, 1);
+    }
 }
