@@ -26,8 +26,8 @@ import sys
 import time
 import random
 import argparse
+import queue
 import threading
-from concurrent.futures import ThreadPoolExecutor, as_completed
 
 try:
     import requests
@@ -191,6 +191,8 @@ def cmd_build():
 
 _thread_local = threading.local()
 _cancel = threading.Event()
+_rate_lock = threading.Lock()
+_last_req_time: float = 0.0
 
 
 def _get_session() -> "requests.Session":
@@ -203,21 +205,53 @@ def _get_session() -> "requests.Session":
     return _thread_local.session
 
 
-def _fetch_one(object_id: int):
-    """Fetch a single object from the Met API. Returns (object_id, url, error).
-    Retries with exponential backoff on 403 (rate limit) or transient errors.
+def _cancellable_sleep(seconds: float) -> bool:
+    """Sleep `seconds` in 0.1s chunks; returns True if cancelled."""
+    deadline = time.monotonic() + seconds
+    while not _cancel.is_set():
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return False
+        time.sleep(min(0.1, remaining))
+    return True
+
+
+def _apply_rate_limit(delay: float) -> None:
+    """Token-bucket: ensure at least `delay` seconds between requests globally."""
+    global _last_req_time
+    sleep_for = 0.0
+    with _rate_lock:
+        now = time.monotonic()
+        gap = delay - (now - _last_req_time)
+        if gap > 0:
+            sleep_for = gap
+            _last_req_time = now + gap
+        else:
+            _last_req_time = now
+    if sleep_for > 0:
+        time.sleep(sleep_for)
+
+
+def _fetch_one(object_id: int, delay: float):
+    """Fetch one object from the Met API. Returns (object_id, url, error).
+    Only retries on 403 (rate limit). Timeouts and other errors fail fast.
     """
     if _cancel.is_set():
         return object_id, None, "cancelled"
 
-    wait = 2.0
-    max_retries = 6  # up to ~2+4+8+16+32+64 = 126 s total sleep before giving up
+    _apply_rate_limit(delay)
 
-    for attempt in range(max_retries + 1):
+    if _cancel.is_set():
+        return object_id, None, "cancelled"
+
+    wait = 2.0
+    max_403_retries = 6
+
+    for attempt in range(max_403_retries + 1):
         if _cancel.is_set():
             return object_id, None, "cancelled"
         try:
-            resp = _get_session().get(f"{MET_API_BASE}/{object_id}", timeout=15)
+            resp = _get_session().get(f"{MET_API_BASE}/{object_id}", timeout=10)
             if resp.status_code == 200:
                 data = resp.json()
                 url = data.get("primaryImageSmall") or data.get("primaryImage") or ""
@@ -225,29 +259,29 @@ def _fetch_one(object_id: int):
             if resp.status_code == 404:
                 return object_id, "", None
             if resp.status_code == 403:
-                if attempt < max_retries:
-                    # Jitter ±25 % so workers don't all wake up together
+                if attempt < max_403_retries:
                     sleep_for = wait + random.uniform(-wait * 0.25, wait * 0.25)
                     print(
                         f"  [rate limited] {object_id}: backing off {sleep_for:.1f}s "
-                        f"(attempt {attempt + 1}/{max_retries})"
+                        f"(attempt {attempt + 1}/{max_403_retries})"
                     )
-                    time.sleep(sleep_for)
+                    if _cancellable_sleep(sleep_for):
+                        return object_id, None, "cancelled"
                     wait = min(wait * 2, 64.0)
                     continue
                 return object_id, None, "403 after max retries"
+            # Any other HTTP error: fail fast, don't retry.
             return object_id, None, f"HTTP {resp.status_code}"
         except Exception as e:
-            if attempt < max_retries:
-                time.sleep(wait + random.uniform(0, 1.0))
-                wait = min(wait * 2, 64.0)
-                continue
+            # Timeout or connection error: fail fast, don't retry.
             return object_id, None, str(e)
 
     return object_id, None, "max retries exceeded"
 
 
-def cmd_fetch_images(workers: int, limit: int | None, department: str | None):
+def cmd_fetch_images(
+    workers: int, limit: int | None, department: str | None, delay: float
+):
     if requests is None:
         print("ERROR: 'requests' package not installed. Run: pip install requests")
         sys.exit(1)
@@ -260,7 +294,6 @@ def cmd_fetch_images(workers: int, limit: int | None, department: str | None):
 
     conn = sqlite3.connect(DB_PATH)
 
-    # Build query — department filter puts the chosen dept first, then everything else.
     params: list = []
     if department:
         where = "WHERE image_url IS NULL AND department = ?"
@@ -277,47 +310,93 @@ def cmd_fetch_images(workers: int, limit: int | None, department: str | None):
 
     scope = f"department '{department}'" if department else "all departments"
     print(
-        f"Fetching image URLs for {total_pending} artworks ({scope}, {workers} workers)"
+        f"Fetching image URLs for {total_pending} artworks ({scope}, {workers} workers, {delay}s/req)"
     )
     print("Press Ctrl+C to stop — progress is saved continuously.\n")
 
-    query = f"SELECT object_id FROM artworks {where} ORDER BY object_id"
+    query = f"SELECT object_id FROM artworks {where} ORDER BY RANDOM()"
     if limit:
         query += f" LIMIT {limit}"
     rows = conn.execute(query, params).fetchall()
+
+    _cancel.clear()
+
+    # Bounded input queue — prevents loading all 200K IDs into worker memory at once.
+    in_q: queue.Queue = queue.Queue(maxsize=workers * 20)
+    out_q: queue.Queue = queue.Queue()
+
+    def worker():
+        """Daemon worker: pull IDs from in_q, push results to out_q."""
+        while not _cancel.is_set():
+            try:
+                item = in_q.get(timeout=0.5)
+            except queue.Empty:
+                continue
+            if item is None:
+                return
+            out_q.put(_fetch_one(item, delay))
+
+    # Daemon threads die automatically if the main thread exits (Ctrl+C).
+    threads = [threading.Thread(target=worker, daemon=True) for _ in range(workers)]
+    for t in threads:
+        t.start()
+
+    def feed():
+        """Daemon feeder: push IDs into in_q, then send one None sentinel per worker."""
+        for (oid,) in rows:
+            while not _cancel.is_set():
+                try:
+                    in_q.put(oid, timeout=0.5)
+                    break
+                except queue.Full:
+                    continue
+        for _ in range(workers):
+            while not _cancel.is_set():
+                try:
+                    in_q.put(None, timeout=0.5)
+                    break
+                except queue.Full:
+                    continue
+
+    feeder = threading.Thread(target=feed, daemon=True)
+    feeder.start()
 
     fetched = 0
     no_image = 0
     errors = 0
     done = 0
 
-    _cancel.clear()
     try:
-        with ThreadPoolExecutor(max_workers=workers) as executor:
-            futures = {executor.submit(_fetch_one, oid): oid for (oid,) in rows}
-            for future in as_completed(futures):
-                object_id, url, error = future.result()
-                done += 1
+        while done < total_pending and not _cancel.is_set():
+            try:
+                result = out_q.get(timeout=1.0)
+            except queue.Empty:
+                # All threads finished before we hit total_pending (e.g. limit).
+                if not feeder.is_alive() and all(not t.is_alive() for t in threads):
+                    break
+                continue
 
-                if error == "cancelled":
-                    continue
-                if error:
-                    print(f"  WARNING {object_id}: {error}")
-                    errors += 1
-                    continue
+            object_id, url, error = result
+            done += 1
 
-                # url is "" for 404/no-image, non-empty string for a real image
-                conn.execute(
-                    "UPDATE artworks SET image_url = ? WHERE object_id = ?",
-                    (url, object_id),
-                )
-                conn.commit()
+            if error == "cancelled":
+                continue
+            if error:
+                print(f"  WARNING {object_id}: {error}")
+                errors += 1
+                continue
 
-                if url:
-                    fetched += 1
-                    print(f"  [{done}/{total_pending}] {object_id}: {url[:70]}...")
-                else:
-                    no_image += 1
+            conn.execute(
+                "UPDATE artworks SET image_url = ? WHERE object_id = ?",
+                (url, object_id),
+            )
+            conn.commit()
+
+            if url:
+                fetched += 1
+                print(f"  [{done}/{total_pending}] {object_id}: {url[:70]}...")
+            else:
+                no_image += 1
 
     except KeyboardInterrupt:
         _cancel.set()
@@ -372,6 +451,12 @@ def main():
         default=None,
         help='Only fetch images for this department, e.g. "European Paintings"',
     )
+    fetch_parser.add_argument(
+        "--delay",
+        type=float,
+        default=0.3,
+        help="Minimum seconds between requests globally (default: 0.3 = ~3 req/s)",
+    )
 
     args = parser.parse_args()
 
@@ -379,7 +464,10 @@ def main():
         cmd_build()
     elif args.command == "fetch-images":
         cmd_fetch_images(
-            workers=args.workers, limit=args.limit, department=args.department
+            workers=args.workers,
+            limit=args.limit,
+            department=args.department,
+            delay=args.delay,
         )
     else:
         parser.print_help()
