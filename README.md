@@ -1,25 +1,40 @@
 # 🏛️ artgg
 
-**artgg** (Art Gallery Generator) is a cross-platform Rust-based TUI that generates desktop wallpapers from classical artwork with museum-style placards.
+**Turn your desktop into a curated museum.**
 
-## ✨ Highlights
+`artgg` (Art Gallery Generator) is a cross-platform TUI that fetches classical masterpieces and transforms them into high-resolution desktop wallpapers, complete with elegant, museum-style placards.
 
-- **Curated Feeds:** Set preferences for artists (e.g., Monet), eras (e.g., Renaissance), or mediums (Oil on Canvas).
-- **Educational Placards:** Includes a rendered placard with the painting name and date, the artist's bio, and a blurb.
-- **Local-First:** Uses a local SQLite database to track your history so you never see the same piece twice unless you want to.
-- **Static:** Generates images on command; No long-running background daemons.
-- **Simple Configuration:** No out-of-the-box configuration required.
+## ✨ Features
 
-## 🚀 Quick Start
+- **🖼️ Curated Feeds:** Filter by museum department. More options to come.
+- **🎓 Educational Placards:** Every wallpaper includes a rendered placard featuring the artwork title, date, and artist.
+- **⚡ Zero Overhead:** Powered by a local SQLite database and generates images on demand. No background daemons or memory-hogging processes.
+- **🛠️ Zero Config:** Works out of the box with sensible defaults.
 
-Install via cargo.
+## 🚀 Installation
+
+### Shell Install
+
+**macOS / Linux:**
 
 ```shell
-cargo install artgg
+curl --proto '=https' --tlsv1.2 -LsSf [https://github.com/ncale/artgg/releases/latest/download/artgg-installer.sh](https://github.com/ncale/artgg/releases/latest/download/artgg-installer.sh) | sh
 ```
 
-Then start the TUI.
+**Windows (PowerShell):**
+
+```powershell
+irm [https://github.com/ncale/artgg/releases/latest/download/artgg-installer.ps1](https://github.com/ncale/artgg/releases/latest/download/artgg-installer.ps1) | iex
+```
+
+## ⌨️ Usage
+
+Simply run the executable to launch the interface:
 
 ```shell
 artgg
 ```
+
+---
+
+Built with Rust and MIT licensed.

@@ -2,7 +2,7 @@
 name = "artgg"
 version = "0.1.0"
 edition = "2021"
-description = "Generate desktop wallpapers from classical artwork with museum-style placards"
+description = "Generate desktop wallpapers from open access artwork with museum-style placards"
 repository = "https://github.com/nickbrodeur/artgg"
 license = "MIT"
 
@@ -19,7 +19,10 @@ anyhow = "1"
 rusqlite = { version = "0.31", features = ["bundled"] }
 
 # Image processing
-image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
+image = { version = "0.25", default-features = false, features = [
+    "jpeg",
+    "png",
+] }
 fontdue = "0.9"
 
 # HTTP for downloading artwork images
