@@ -37,23 +37,24 @@ except ImportError:
 # ---------------------------------------------------------------------------
 # Paths (all relative to this script's location)
 # ---------------------------------------------------------------------------
-SCRIPT_DIR  = os.path.dirname(os.path.abspath(__file__))
-ASSETS_DIR  = os.path.join(SCRIPT_DIR, "..", "assets")
-CSV_PATH    = os.path.join(ASSETS_DIR, "raw", "MetObjects.csv")
-DB_PATH     = os.path.join(ASSETS_DIR, "collection.db")
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+ASSETS_DIR = os.path.join(SCRIPT_DIR, "..", "assets")
+CSV_PATH = os.path.join(ASSETS_DIR, "raw", "MetObjects.csv")
+DB_PATH = os.path.join(ASSETS_DIR, "collection.db")
 SCHEMA_PATH = os.path.join(SCRIPT_DIR, "schema.sql")
 
 MET_API_BASE = "https://collectionapi.metmuseum.org/public/collection/v1/objects"
+
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 def build_artist_display(row: dict) -> str:
     """Combine artist name + nationality/dates into a single display string."""
-    name        = row.get("Artist Display Name", "").strip()
+    name = row.get("Artist Display Name", "").strip()
     nationality = row.get("Artist Nationality", "").strip()
-    begin_date  = row.get("Artist Begin Date", "").strip()
-    end_date    = row.get("Artist End Date", "").strip()
+    begin_date = row.get("Artist Begin Date", "").strip()
+    end_date = row.get("Artist End Date", "").strip()
 
     if not name:
         return ""
@@ -80,7 +81,7 @@ def extract_year(date_display: str) -> int | None:
     """Extract the first 4-digit year from a date string."""
     if not date_display:
         return None
-    m = re.search(r'\b(\d{4})\b', date_display)
+    m = re.search(r"\b(\d{4})\b", date_display)
     return int(m.group(1)) if m else None
 
 
@@ -120,7 +121,7 @@ def cmd_build():
 
     print(f"Reading CSV from {CSV_PATH}")
     inserted = 0
-    skipped  = 0
+    skipped = 0
 
     with open(CSV_PATH, newline="", encoding="utf-8") as csvfile:
         reader = csv.DictReader(csvfile)
@@ -137,7 +138,7 @@ def cmd_build():
                 continue
 
             date_display = row.get("Object Date", "").strip() or None
-            year_approx  = extract_year(date_display) if date_display else None
+            year_approx = extract_year(date_display) if date_display else None
 
             # Link Resource is a page URL, not an image URL.
             # The image_url field stays NULL until fetch-images is run.
@@ -179,7 +180,9 @@ def cmd_build():
 
     print(f"\nDone. {inserted} artworks inserted, {skipped} rows skipped.")
     print(f"Database written to: {DB_PATH}")
-    print(f"\nNext step: run 'python build_db.py fetch-images' to fetch real image URLs.")
+    print(
+        f"\nNext step: run 'python build_db.py fetch-images' to fetch real image URLs."
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -193,7 +196,9 @@ _cancel = threading.Event()
 def _get_session() -> "requests.Session":
     if not hasattr(_thread_local, "session"):
         s = requests.Session()
-        s.headers.update({"User-Agent": "artgg/0.1 (wallpaper generator; educational use)"})
+        s.headers.update(
+            {"User-Agent": "artgg/0.1 (wallpaper generator; educational use)"}
+        )
         _thread_local.session = s
     return _thread_local.session
 
@@ -223,8 +228,10 @@ def _fetch_one(object_id: int):
                 if attempt < max_retries:
                     # Jitter ±25 % so workers don't all wake up together
                     sleep_for = wait + random.uniform(-wait * 0.25, wait * 0.25)
-                    print(f"  [rate limited] {object_id}: backing off {sleep_for:.1f}s "
-                          f"(attempt {attempt + 1}/{max_retries})")
+                    print(
+                        f"  [rate limited] {object_id}: backing off {sleep_for:.1f}s "
+                        f"(attempt {attempt + 1}/{max_retries})"
+                    )
                     time.sleep(sleep_for)
                     wait = min(wait * 2, 64.0)
                     continue
@@ -246,7 +253,9 @@ def cmd_fetch_images(workers: int, limit: int | None, department: str | None):
         sys.exit(1)
 
     if not os.path.exists(DB_PATH):
-        print(f"ERROR: Database not found at {DB_PATH}. Run 'python build_db.py build' first.")
+        print(
+            f"ERROR: Database not found at {DB_PATH}. Run 'python build_db.py build' first."
+        )
         sys.exit(1)
 
     conn = sqlite3.connect(DB_PATH)
@@ -259,13 +268,17 @@ def cmd_fetch_images(workers: int, limit: int | None, department: str | None):
     else:
         where = "WHERE image_url IS NULL"
 
-    count_row = conn.execute(f"SELECT COUNT(*) FROM artworks {where}", params).fetchone()
+    count_row = conn.execute(
+        f"SELECT COUNT(*) FROM artworks {where}", params
+    ).fetchone()
     total_pending = count_row[0]
     if limit:
         total_pending = min(total_pending, limit)
 
     scope = f"department '{department}'" if department else "all departments"
-    print(f"Fetching image URLs for {total_pending} artworks ({scope}, {workers} workers)")
+    print(
+        f"Fetching image URLs for {total_pending} artworks ({scope}, {workers} workers)"
+    )
     print("Press Ctrl+C to stop — progress is saved continuously.\n")
 
     query = f"SELECT object_id FROM artworks {where} ORDER BY object_id"
@@ -273,10 +286,10 @@ def cmd_fetch_images(workers: int, limit: int | None, department: str | None):
         query += f" LIMIT {limit}"
     rows = conn.execute(query, params).fetchall()
 
-    fetched  = 0
+    fetched = 0
     no_image = 0
-    errors   = 0
-    done     = 0
+    errors = 0
+    done = 0
 
     _cancel.clear()
     try:
@@ -342,16 +355,22 @@ def main():
         "fetch-images", help="Fetch real image URLs from the Met API"
     )
     fetch_parser.add_argument(
-        "--workers", type=int, default=5,
-        help="Number of concurrent requests (default: 5)"
+        "--workers",
+        type=int,
+        default=5,
+        help="Number of concurrent requests (default: 5)",
     )
     fetch_parser.add_argument(
-        "--limit", type=int, default=None,
-        help="Maximum number of artworks to process (default: all)"
+        "--limit",
+        type=int,
+        default=None,
+        help="Maximum number of artworks to process (default: all)",
     )
     fetch_parser.add_argument(
-        "--department", type=str, default=None,
-        help='Only fetch images for this department, e.g. "European Paintings"'
+        "--department",
+        type=str,
+        default=None,
+        help='Only fetch images for this department, e.g. "European Paintings"',
     )
 
     args = parser.parse_args()
@@ -359,7 +378,9 @@ def main():
     if args.command == "build" or args.command is None:
         cmd_build()
     elif args.command == "fetch-images":
-        cmd_fetch_images(workers=args.workers, limit=args.limit, department=args.department)
+        cmd_fetch_images(
+            workers=args.workers, limit=args.limit, department=args.department
+        )
     else:
         parser.print_help()
 
