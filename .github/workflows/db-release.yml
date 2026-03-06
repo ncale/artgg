@@ -35,5 +35,6 @@ jobs:
           tag_name: db-${{ github.event.inputs.version }}
           name: Database ${{ github.event.inputs.version }}
           files: assets/collection.db
+          prerelease: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
