@@ -2,6 +2,10 @@
 
 **Turn your desktop into a curated museum.**
 
+`artgg` (Art Gallery Generator) is a cross-platform TUI that fetches classical masterpieces and transforms them into high-resolution desktop wallpapers, complete with elegant, museum-style placards.
+
+![Demo](.github/assets/demo.gif)
+
 <table>
   <tr>
     <td><img src=".github/assets/wallpapers/1.jpg" width="400"/></td>
@@ -12,8 +16,6 @@
     <td><img src=".github/assets/wallpapers/4.jpg" width="400"/></td>
   </tr>
 </table>
-
-`artgg` (Art Gallery Generator) is a cross-platform TUI that fetches classical masterpieces and transforms them into high-resolution desktop wallpapers, complete with elegant, museum-style placards.
 
 ## ✨ Features
 
