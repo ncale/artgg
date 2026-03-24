@@ -407,6 +407,9 @@ impl App {
                     self.build_done_dir = output_dir;
                     self.build_step = BuildStep::Done;
                     self.build_rx = None;
+                    self.cache_size_label = db::compute_image_cache_size()
+                        .map(db::format_cache_size)
+                        .unwrap_or_else(|_| "?".to_string());
                 }
                 BuildMessage::Error(e) => {
                     self.push_log(format!("ERROR: {}", e));
