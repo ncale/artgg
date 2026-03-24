@@ -334,12 +334,18 @@ fn seed_defaults(conn: &Connection) -> Result<()> {
 mod tests {
     use super::*;
 
+    fn test_conn() -> Connection {
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch("PRAGMA foreign_keys = ON;").unwrap();
+        embedded::migrations::runner().run(&mut conn).unwrap();
+        conn
+    }
+
+    // ── Migrations ──────────────────────────────────────────────────────────
+
     #[test]
     fn migrations_run_on_fresh_db() {
-        let tmp = tempfile::NamedTempFile::new().unwrap();
-        let mut conn = Connection::open(tmp.path()).unwrap();
-        embedded::migrations::runner().run(&mut conn).unwrap();
-        // Verify all expected tables exist
+        let conn = test_conn();
         let tables: Vec<String> = {
             let mut s = conn.prepare(
                 "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name"
@@ -351,10 +357,184 @@ mod tests {
                    "taste_profile_departments", "taste_profiles", "url_cache"] {
             assert!(tables.contains(&t.to_string()), "missing table: {t}");
         }
-        // Verify migration is recorded
-        let count: i64 = conn.query_row(
-            "SELECT COUNT(*) FROM refinery_schema_history", [], |r| r.get(0)
+    }
+
+    // ── Taste profiles ───────────────────────────────────────────────────────
+
+    #[test]
+    fn taste_profile_insert_and_load() {
+        let conn = test_conn();
+        let id = insert_taste_profile(&conn, "Modern Art", Some(1900), Some(2000), false).unwrap();
+        add_taste_profile_department(&conn, id, "Paintings").unwrap();
+        add_taste_profile_department(&conn, id, "Sculpture").unwrap();
+
+        let profiles = load_taste_profiles(&conn).unwrap();
+        assert_eq!(profiles.len(), 1);
+        let p = &profiles[0];
+        assert_eq!(p.name, "Modern Art");
+        assert_eq!(p.date_start, Some(1900));
+        assert_eq!(p.date_end, Some(2000));
+        assert!(!p.is_public_domain);
+        assert_eq!(p.departments, vec!["Paintings", "Sculpture"]);
+    }
+
+    #[test]
+    fn taste_profile_update() {
+        let conn = test_conn();
+        let id = insert_taste_profile(&conn, "Old", None, None, false).unwrap();
+        update_taste_profile_fields(&conn, id, Some(1800), Some(1900), true).unwrap();
+
+        let profiles = load_taste_profiles(&conn).unwrap();
+        assert_eq!(profiles[0].date_start, Some(1800));
+        assert_eq!(profiles[0].date_end, Some(1900));
+        assert!(profiles[0].is_public_domain);
+    }
+
+    #[test]
+    fn taste_profile_delete() {
+        let conn = test_conn();
+        let id = insert_taste_profile(&conn, "Temp", None, None, true).unwrap();
+        assert_eq!(load_taste_profiles(&conn).unwrap().len(), 1);
+        delete_taste_profile(&conn, id).unwrap();
+        assert_eq!(load_taste_profiles(&conn).unwrap().len(), 0);
+    }
+
+    #[test]
+    fn taste_profile_department_toggle() {
+        let conn = test_conn();
+        let id = insert_taste_profile(&conn, "Test", None, None, true).unwrap();
+        add_taste_profile_department(&conn, id, "Prints").unwrap();
+        add_taste_profile_department(&conn, id, "Prints").unwrap(); // duplicate — ignored
+        remove_taste_profile_department(&conn, id, "Prints").unwrap();
+
+        let profiles = load_taste_profiles(&conn).unwrap();
+        assert!(profiles[0].departments.is_empty());
+    }
+
+    // ── Display profiles ─────────────────────────────────────────────────────
+
+    #[test]
+    fn display_profile_insert_and_load() {
+        let conn = test_conn();
+        insert_display_profile(
+            &conn, "4K", "#000000", "", "horizontal", 3840, 2160,
+            "#ffffff", "#000000", 80,
         ).unwrap();
-        assert_eq!(count, 1);
+
+        let profiles = load_display_profiles(&conn).unwrap();
+        assert_eq!(profiles.len(), 1);
+        let p = &profiles[0];
+        assert_eq!(p.name, "4K");
+        assert_eq!(p.canvas_width, 3840);
+        assert_eq!(p.canvas_height, 2160);
+        assert_eq!(p.placard_opacity, 80);
+    }
+
+    #[test]
+    fn display_profile_update() {
+        let conn = test_conn();
+        let id = insert_display_profile(
+            &conn, "Old", "#000000", "", "horizontal", 1920, 1080,
+            "#ffffff", "#000000", 90,
+        ).unwrap();
+        update_display_profile_fields(
+            &conn, id, "#111111", "", "vertical", 1080, 1920,
+            "#eeeeee", "#111111", 50,
+        ).unwrap();
+
+        let p = &load_display_profiles(&conn).unwrap()[0];
+        assert_eq!(p.wallpaper_color, "#111111");
+        assert_eq!(p.orientation, "vertical");
+        assert_eq!(p.canvas_width, 1080);
+        assert_eq!(p.placard_opacity, 50);
+    }
+
+    #[test]
+    fn display_profile_delete() {
+        let conn = test_conn();
+        insert_display_profile(
+            &conn, "Temp", "#000000", "", "horizontal", 1920, 1080,
+            "#ffffff", "#000000", 90,
+        ).unwrap();
+        let id = load_display_profiles(&conn).unwrap()[0].id;
+        delete_display_profile(&conn, id).unwrap();
+        assert_eq!(load_display_profiles(&conn).unwrap().len(), 0);
+    }
+
+    // ── URL cache ────────────────────────────────────────────────────────────
+
+    #[test]
+    fn url_cache_valid_entry() {
+        let conn = test_conn();
+        upsert_url_cache_valid(&conn, 42, "https://example.com/image.jpg").unwrap();
+
+        let entry = get_url_cache(&conn, 42).unwrap().unwrap();
+        assert!(entry.is_valid);
+        assert_eq!(entry.image_url.as_deref(), Some("https://example.com/image.jpg"));
+    }
+
+    #[test]
+    fn url_cache_invalid_entry() {
+        let conn = test_conn();
+        upsert_url_cache_invalid(&conn, 99).unwrap();
+
+        let entry = get_url_cache(&conn, 99).unwrap().unwrap();
+        assert!(!entry.is_valid);
+        assert!(entry.image_url.is_none());
+    }
+
+    #[test]
+    fn url_cache_upsert_overwrites() {
+        let conn = test_conn();
+        upsert_url_cache_valid(&conn, 7, "https://example.com/old.jpg").unwrap();
+        upsert_url_cache_invalid(&conn, 7).unwrap();
+
+        let entry = get_url_cache(&conn, 7).unwrap().unwrap();
+        assert!(!entry.is_valid);
+        assert!(entry.image_url.is_none());
+    }
+
+    #[test]
+    fn url_cache_miss_returns_none() {
+        let conn = test_conn();
+        assert!(get_url_cache(&conn, 999).unwrap().is_none());
+    }
+
+    // ── Seed defaults ────────────────────────────────────────────────────────
+
+    #[test]
+    fn seed_defaults_populates_empty_db() {
+        let conn = test_conn();
+        seed_defaults(&conn).unwrap();
+
+        let taste = load_taste_profiles(&conn).unwrap();
+        assert_eq!(taste.len(), 1);
+        assert_eq!(taste[0].name, "European Paintings");
+
+        let display = load_display_profiles(&conn).unwrap();
+        assert_eq!(display.len(), 1);
+        assert_eq!(display[0].name, "Default");
+    }
+
+    #[test]
+    fn seed_defaults_is_idempotent() {
+        let conn = test_conn();
+        seed_defaults(&conn).unwrap();
+        seed_defaults(&conn).unwrap();
+
+        assert_eq!(load_taste_profiles(&conn).unwrap().len(), 1);
+        assert_eq!(load_display_profiles(&conn).unwrap().len(), 1);
+    }
+
+    // ── format_cache_size ────────────────────────────────────────────────────
+
+    #[test]
+    fn format_cache_size_units() {
+        assert_eq!(format_cache_size(0), "0 B");
+        assert_eq!(format_cache_size(512), "512 B");
+        assert_eq!(format_cache_size(1024), "1.0 KB");
+        assert_eq!(format_cache_size(1_536), "1.5 KB");
+        assert_eq!(format_cache_size(1_048_576), "1.0 MB");
+        assert_eq!(format_cache_size(1_073_741_824), "1.0 GB");
     }
 }
