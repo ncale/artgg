@@ -266,6 +266,45 @@ pub fn upsert_url_cache_invalid(conn: &Connection, object_id: i64) -> Result<()>
 }
 
 // ---------------------------------------------------------------------------
+// Image cache helpers
+// ---------------------------------------------------------------------------
+
+pub fn compute_image_cache_size() -> anyhow::Result<u64> {
+    let images_dir = cache_dir()?.join("images");
+    if !images_dir.exists() {
+        return Ok(0);
+    }
+    let mut total = 0u64;
+    for entry in fs::read_dir(&images_dir)? {
+        if let Ok(meta) = entry?.metadata() {
+            total += meta.len();
+        }
+    }
+    Ok(total)
+}
+
+pub fn format_cache_size(bytes: u64) -> String {
+    if bytes >= 1_073_741_824 {
+        format!("{:.1} GB", bytes as f64 / 1_073_741_824.0)
+    } else if bytes >= 1_048_576 {
+        format!("{:.1} MB", bytes as f64 / 1_048_576.0)
+    } else if bytes >= 1024 {
+        format!("{:.1} KB", bytes as f64 / 1024.0)
+    } else {
+        format!("{} B", bytes)
+    }
+}
+
+pub fn clear_image_cache(conn: &Connection) -> anyhow::Result<()> {
+    let images_dir = cache_dir()?.join("images");
+    if images_dir.exists() {
+        fs::remove_dir_all(&images_dir)?;
+    }
+    conn.execute("DELETE FROM url_cache", [])?;
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
 // Default seed data
 // ---------------------------------------------------------------------------
 
