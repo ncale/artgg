@@ -1,7 +1,7 @@
 use ratatui::{
     layout::{Alignment, Constraint, Direction, Layout, Margin, Rect},
     style::{Color, Modifier, Style},
-    text::{Line, Span},
+    text::{Line, Span, Text},
     widgets::{Block, BorderType, Borders, Gauge, List, ListItem, ListState, Paragraph, Wrap},
     Frame,
 };
@@ -96,7 +96,8 @@ fn draw_main(frame: &mut Frame, app: &App) {
     frame.render_stateful_widget(list, body[0], &mut list_state);
 
     let selected_item = MainItem::ALL[app.main_selected];
-    let detail = Paragraph::new(selected_item.description())
+    let description_text = main_item_description(selected_item, &app.cache_size_label);
+    let detail = Paragraph::new(description_text)
         .wrap(Wrap { trim: true })
         .block(Block::default().borders(Borders::ALL).border_type(BorderType::Rounded)
             .border_style(Style::default().fg(Color::DarkGray))
@@ -712,6 +713,17 @@ fn draw_build_done(frame: &mut Frame, app: &App) {
 // ---------------------------------------------------------------------------
 // Small widget helpers
 // ---------------------------------------------------------------------------
+
+fn main_item_description<'a>(item: MainItem, cache_size: &'a str) -> Text<'a> {
+    match item {
+        MainItem::ClearCache => Text::from(Line::from(vec![
+            Span::raw("Delete cached artwork images "),
+            Span::styled(format!("({})", cache_size), Style::default().fg(Color::Cyan)),
+            Span::raw(" to free up disk space. Also clears the URL cache so images will be re-fetched on the next build."),
+        ])),
+        _ => Text::from(item.description(cache_size)),
+    }
+}
 
 fn no_profiles_msg(title: &str) -> Paragraph<'_> {
     Paragraph::new("No profiles — create one first.")
