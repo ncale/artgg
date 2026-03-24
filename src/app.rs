@@ -226,7 +226,7 @@ pub enum MainItem {
     TasteProfiles,
     DisplayProfiles,
     Build,
-    Prune,
+    ClearCache,
     Exit,
 }
 
@@ -235,7 +235,7 @@ impl MainItem {
         MainItem::TasteProfiles,
         MainItem::DisplayProfiles,
         MainItem::Build,
-        MainItem::Prune,
+        MainItem::ClearCache,
         MainItem::Exit,
     ];
 
@@ -244,23 +244,23 @@ impl MainItem {
             MainItem::TasteProfiles => "Taste Profiles",
             MainItem::DisplayProfiles => "Display Profiles",
             MainItem::Build => "Build",
-            MainItem::Prune => "Prune",
+            MainItem::ClearCache => "Clear Cache",
             MainItem::Exit => "Exit",
         }
     }
 
-    pub fn description(&self) -> &'static str {
+    pub fn description(&self, cache_size: &str) -> String {
         match self {
-            MainItem::TasteProfiles => "Manage your art taste profiles (subjects, styles, periods)",
-            MainItem::DisplayProfiles => "Manage your display profiles (resolution, color, frame)",
-            MainItem::Build => "Build a wallpaper gallery by picking a taste + display profile",
-            MainItem::Prune => "Remove old images based on retention limits (coming soon)",
-            MainItem::Exit => "Exit artgg",
+            MainItem::TasteProfiles => "Manage your art taste profiles (subjects, styles, periods)".to_string(),
+            MainItem::DisplayProfiles => "Manage your display profiles (resolution, color, frame)".to_string(),
+            MainItem::Build => "Build a wallpaper gallery by picking a taste + display profile".to_string(),
+            MainItem::ClearCache => format!("Delete cached artwork images ({}) and URL cache to free up disk space. ", cache_size),
+            MainItem::Exit => "Exit artgg".to_string(),
         }
     }
 
     pub fn is_disabled(&self) -> bool {
-        matches!(self, MainItem::Prune)
+        false
     }
 }
 
@@ -306,6 +306,9 @@ pub struct App {
     pub build_produced: usize,
     pub build_skipped: usize,
     pub build_done_dir: String,
+
+    // Cache info
+    pub cache_size_label: String,
 
     // Database (user data)
     pub conn: Connection,
@@ -360,6 +363,10 @@ impl App {
             build_produced: 0,
             build_skipped: 0,
             build_done_dir: String::new(),
+
+            cache_size_label: db::compute_image_cache_size()
+                .map(db::format_cache_size)
+                .unwrap_or_else(|_| "?".to_string()),
 
             conn,
         })
@@ -478,7 +485,12 @@ impl App {
                 self.build_display_idx = 0;
                 self.screen = Screen::Build;
             }
-            MainItem::Prune => {}
+            MainItem::ClearCache => {
+                let _ = db::clear_image_cache(&self.conn);
+                self.cache_size_label = db::compute_image_cache_size()
+                    .map(db::format_cache_size)
+                    .unwrap_or_else(|_| "?".to_string());
+            }
             MainItem::Exit => self.should_quit = true,
         }
     }
