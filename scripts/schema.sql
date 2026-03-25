@@ -8,7 +8,7 @@ CREATE TABLE IF NOT EXISTS artworks (
 
     -- Core display fields (used for the museum placard)
     title             TEXT,
-    artist_display   TEXT,    -- e.g. "Vincent van Gogh (Dutch, 1853–1890)"
+    artist_display    TEXT,    -- display_name of the primary (first-listed) artist; denormalized for placard rendering
     date_display      TEXT,    -- e.g. "1889" or "ca. 1760–65"
     medium            TEXT,    -- e.g. "Oil on canvas"
     dimensions        TEXT,
@@ -25,10 +25,34 @@ CREATE TABLE IF NOT EXISTS artworks (
     -- e.g. "landscapes|trees|night sky"
     tags              TEXT,
 
-    is_public_domain  INTEGER, -- 0 or 1 (boolean)
-
     -- Extracted year for date-range filtering (first 4-digit year from date_display)
     year_approx       INTEGER  -- e.g. 1889
+);
+
+-- Normalized artist records keyed by display name.
+-- Constituent IDs in the CSV are not reliably pipe-separated for multi-artist
+-- records, so display_name is used as the stable identifier.
+CREATE TABLE IF NOT EXISTS artists (
+    display_name    TEXT PRIMARY KEY,
+    display_bio     TEXT,    -- e.g. "Dutch, 1853–1890"
+    nationality     TEXT,    -- e.g. "Dutch"
+    begin_date      TEXT,    -- e.g. "1853"
+    end_date        TEXT,    -- e.g. "1890"
+    gender          TEXT,
+    ulan_url        TEXT,
+    wikidata_url    TEXT
+);
+
+-- Junction table linking artworks to their artists.
+-- One artwork may have multiple artists; one artist may appear in many artworks.
+CREATE TABLE IF NOT EXISTS artwork_artists (
+    object_id       INTEGER NOT NULL REFERENCES artworks(object_id),
+    artist_name     TEXT    NOT NULL REFERENCES artists(display_name),
+    role            TEXT,    -- e.g. "Artist", "Maker", "Designer"
+    prefix          TEXT,    -- e.g. "attributed to", "after"
+    suffix          TEXT,
+    alpha_sort      TEXT,    -- e.g. "Gogh, Vincent van" (for sorting)
+    PRIMARY KEY (object_id, artist_name)
 );
 
 -- Full-text search virtual table over the fields users might query by interest
